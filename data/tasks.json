@@ -1,11 +1,11 @@
 [
   {
     "id": "6htw",
-    "bannerUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/tasks/1788663346953_6hbnr.jpg",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1788663346953_6hbnr.jpg",
     "title": "友魚守護團",
     "description": "海線出任務",
     "colorTheme": "mint",
-    "link": "https://ericvu-cd.github.io/6htw/",
+    "link": "https://cnhuansia30.github.io/6htw/",
     "entryCost": 0,
     "unlockConditions": [
       {
@@ -23,11 +23,11 @@
   },
   {
     "id": "mlhbtrip",
-    "bannerUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/tasks/1788663436455_lbsbnr.jpg",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1788663436455_lbsbnr.jpg",
     "title": "苗栗漁港一日遊",
     "description": "LBS定址服務",
     "colorTheme": "peach",
-    "link": "https://ericvu-cd.github.io/lbsgame/mlhbtrip.html",
+    "link": "https://cnhuansia30.github.io/lbsgame/mlhbtrip.html",
     "entryCost": 0,
     "unlockConditions": [
       {
@@ -45,11 +45,11 @@
   },
   {
     "id": "fishmarket",
-    "bannerUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/tasks/1788663458963_fmbnr.jpg",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1788663458963_fmbnr.jpg",
     "title": "永續魚市拍賣",
     "description": "走讀龍鳳漁港",
     "colorTheme": "sky",
-    "link": "https://ericvu-cd.github.io/lbsgame/fishmarket.html",
+    "link": "https://cnhuansia30.github.io/lbsgame/fishmarket.html",
     "entryCost": 1,
     "unlockConditions": [
       {
@@ -73,11 +73,11 @@
   },
   {
     "id": "stoneweir",
-    "bannerUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/tasks/1788663475740_swbnr.jpg",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1788663475740_swbnr.jpg",
     "title": "石滬修復",
     "description": "走讀外埔漁港",
     "colorTheme": "peach",
-    "link": "https://ericvu-cd.github.io/lbsgame/stoneweir.html",
+    "link": "https://cnhuansia30.github.io/lbsgame/stoneweir.html",
     "entryCost": 1,
     "unlockConditions": [
       {
@@ -101,11 +101,11 @@
   },
   {
     "id": "fishball",
-    "bannerUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/tasks/1788663490971_fbbnr.jpg",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1788663490971_fbbnr.jpg",
     "title": "魚丸追追樂",
     "description": "走讀苑港漁港",
     "colorTheme": "gold",
-    "link": "https://ericvu-cd.github.io/lbsgame/fishball.html",
+    "link": "https://cnhuansia30.github.io/lbsgame/fishball.html",
     "entryCost": 1,
     "unlockConditions": [
       {
