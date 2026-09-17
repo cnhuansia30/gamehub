@@ -1,0 +1,1434 @@
+// =====================================================
+// 管理後台程式邏輯（GitHub 遷移版）
+// 內容資料（Banner/任務/公告/徽章/證書）改用 GitHub Contents API 讀寫，
+// 圖片直接上傳進 repo（無壓縮，見架構調整討論記錄第三輪確認）。
+// 使用者資料編修維持走 Firestore + Google 登入，不變。
+// =====================================================
+import { auth, db } from '../js/firebase-config.js';
+import {
+    GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+    doc, getDoc, updateDoc, deleteDoc, collection, getDocs, query, orderBy, limit
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+// 徽章/證書/商店/任務共用的圖片上傳工具函式（見下方 uploadPendingImage 等函式）
+
+// 把使用者可控的字串（暱稱、排行榜玩家名）安全地插入 HTML，避免有人繞過網頁介面
+// 直接寫入含 HTML/script 的內容時，在後台畫面被當成程式碼執行（儲存型 XSS 防護）。
+function escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+/* =====================================================
+   GitHub Contents API 連線層
+===================================================== */
+const GH_CONFIG_KEY = 'gh_admin_config';
+
+function getGhConfig() {
+    try { return JSON.parse(localStorage.getItem(GH_CONFIG_KEY) || 'null'); }
+    catch { return null; }
+}
+function setGhConfig(cfg) { localStorage.setItem(GH_CONFIG_KEY, JSON.stringify(cfg)); }
+function clearGhConfig() { localStorage.removeItem(GH_CONFIG_KEY); }
+
+async function ghRequest(path, options = {}) {
+    const cfg = getGhConfig();
+    if (!cfg) throw new Error('尚未設定 GitHub 連線資訊');
+    const url = `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${path}`;
+    const res = await fetch(url, {
+        ...options,
+        headers: {
+            'Authorization': `Bearer ${cfg.token}`,
+            'Accept': 'application/vnd.github+json',
+            ...(options.headers || {})
+        }
+    });
+    if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const err = new Error(`GitHub API 錯誤（${res.status}）：${body.message || res.statusText}`);
+        err.status = res.status;
+        throw err;
+    }
+    return res.status === 204 ? null : res.json();
+}
+
+function utf8ToBase64(str) {
+    return btoa(unescape(encodeURIComponent(str)));
+}
+function base64ToUtf8(b64) {
+    return decodeURIComponent(escape(atob(b64.replace(/\n/g, ''))));
+}
+
+// 讀取一份 JSON 檔案，回傳 { data, sha }；檔案不存在時回傳 { data: fallback, sha: null }
+async function readJsonFile(path, fallback) {
+    try {
+        const res = await ghRequest(path);
+        return { data: JSON.parse(base64ToUtf8(res.content)), sha: res.sha };
+    } catch (err) {
+        if (err.status === 404) return { data: fallback, sha: null };
+        throw err;
+    }
+}
+
+// 寫回一份 JSON 檔案（新增或更新皆可，sha 為 null 代表新建檔案）
+async function writeJsonFile(path, jsonData, sha, message) {
+    const cfg = getGhConfig();
+    const body = {
+        message: message || `更新 ${path}`,
+        content: utf8ToBase64(JSON.stringify(jsonData, null, 2)),
+        branch: cfg.branch || 'main'
+    };
+    if (sha) body.sha = sha;
+    return ghRequest(path, { method: 'PUT', body: JSON.stringify(body) });
+}
+
+// 上傳圖片檔案，回傳可直接使用的圖片網址（raw.githubusercontent.com）
+async function uploadImageToGithub(file, folder) {
+    const cfg = getGhConfig();
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const base64 = btoa(binary);
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `data/images/${folder}/${Date.now()}_${safeName}`;
+
+    await ghRequest(path, {
+        method: 'PUT',
+        body: JSON.stringify({
+            message: `上傳圖片 ${safeName}`,
+            content: base64,
+            branch: cfg.branch || 'main'
+        })
+    });
+    return `https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${cfg.branch || 'main'}/${path}`;
+}
+
+/* =====================================================
+   GitHub 連線設定畫面
+===================================================== */
+window.toggleGhTokenVisibility = function (event) {
+    const input = document.getElementById('gh-token');
+    const btn = event.currentTarget;
+    const isMasked = input.classList.contains('masked');
+    if (isMasked) { input.classList.remove('masked'); btn.innerText = '隱藏'; }
+    else { input.classList.add('masked'); btn.innerText = '顯示'; }
+};
+
+window.saveGhSetup = async function () {
+    const owner = document.getElementById('gh-owner').value.trim();
+    const repo = document.getElementById('gh-repo').value.trim();
+    const branch = document.getElementById('gh-branch').value.trim() || 'main';
+    const token = document.getElementById('gh-token').value.trim();
+    const errorEl = document.getElementById('gh-setup-error');
+    errorEl.classList.add('hidden');
+
+    if (!owner || !repo || !token) {
+        errorEl.innerText = '請填寫完整資訊';
+        errorEl.classList.remove('hidden');
+        return;
+    }
+
+    setGhConfig({ owner, repo, branch, token });
+
+    try {
+        // 測試連線：嘗試讀取 repo 根目錄
+        await ghRequest('');
+        showGhApp();
+    } catch (err) {
+        clearGhConfig();
+        errorEl.innerText = '連線失敗：' + err.message;
+        errorEl.classList.remove('hidden');
+    }
+};
+
+window.disconnectGh = function () {
+    if (!confirm('確定要中斷 GitHub 連線嗎？權杖只會從這台瀏覽器移除，不影響 GitHub 上的設定。')) return;
+    clearGhConfig();
+    location.reload();
+};
+
+function showGhApp() {
+    const cfg = getGhConfig();
+    document.getElementById('gh-setup-screen').classList.add('hidden');
+    document.getElementById('gh-app').classList.remove('hidden');
+    document.getElementById('gh-status-text').innerText = `${cfg.owner}/${cfg.repo}（${cfg.branch}）`;
+    document.getElementById('gh-repo-label').innerText = `${cfg.owner}/${cfg.repo}`;
+    loadAllContentLists();
+}
+
+/* =====================================================
+   分頁切換
+===================================================== */
+window.switchAdminTab = function (tabName) {
+    document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tabName));
+    document.querySelectorAll('section.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tabName}`));
+};
+
+/* =====================================================
+   圖片上傳（表單用，選檔後先預覽，送出時才真的上傳）
+===================================================== */
+const editState = {
+    banners: { editingId: null, pendingFile: null, sha: null, items: [] },
+    tasks: { editingId: null, pendingFile: null, sha: null, items: [] },
+    news: { editingId: null, pendingFile: null, sha: null, items: [] },
+    badges: { editingId: null, pendingFile: null, sha: null, items: {} },
+    certificates: { editingId: null, pendingFile: null, sha: null, items: {} },
+    shopItems: { editingId: null, pendingFile: null, sha: null, items: [] },
+    settings: { sha: null, data: { dailyLoginCoins: 10, levelStep: 25 } }
+};
+
+function showMsg(panelKey, text, isError = false) {
+    const el = document.getElementById(`${panelKey}-msg`);
+    el.innerHTML = `<div class="msg ${isError ? 'err' : 'ok'}">${text}</div>`;
+    setTimeout(() => { el.innerHTML = ''; }, 4000);
+}
+
+function dateToMs(dateStr) { return dateStr ? new Date(dateStr + 'T00:00:00').getTime() : null; }
+function msToDateValue(ms) { return ms ? new Date(ms).toISOString().slice(0, 10) : ''; }
+
+window.handleImageSelect = function (event, entityKey) {
+    const file = event.target.files[0];
+    if (!file) return;
+    editState[entityKey].pendingFile = file;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const img = document.getElementById(`${entityKey}-image-preview`);
+        img.src = e.target.result;
+        img.style.display = 'block';
+        document.getElementById(`${entityKey}-image-placeholder`).classList.add('hidden');
+    };
+    reader.readAsDataURL(file);
+};
+
+async function uploadPendingImage(entityKey, existingUrl) {
+    const pending = editState[entityKey].pendingFile;
+    if (!pending) return existingUrl || null;
+    const progressEl = document.getElementById(`${entityKey}-upload-progress`);
+    progressEl.innerText = '圖片上傳中（正在寫入 GitHub）...';
+    try {
+        const url = await uploadImageToGithub(pending, entityKey);
+        progressEl.innerText = '✓ 圖片上傳完成';
+        setTimeout(() => { progressEl.innerText = ''; }, 2500);
+        return url;
+    } catch (err) {
+        progressEl.innerText = '❌ 圖片上傳失敗：' + err.message;
+        throw err;
+    }
+}
+
+function resetImagePreview(entityKey) {
+    const img = document.getElementById(`${entityKey}-image-preview`);
+    if (!img) return;
+    img.src = ''; img.style.display = 'none';
+    document.getElementById(`${entityKey}-image-placeholder`).classList.remove('hidden');
+    editState[entityKey].pendingFile = null;
+    const fileInput = document.querySelector(`#${entityKey}-form input[type=file]`);
+    if (fileInput) fileInput.value = '';
+}
+
+function showExistingImage(entityKey, url) {
+    const img = document.getElementById(`${entityKey}-image-preview`);
+    if (!img) return;
+    const placeholder = document.getElementById(`${entityKey}-image-placeholder`);
+    if (url) { img.src = url; img.style.display = 'block'; placeholder.classList.add('hidden'); }
+    else { img.src = ''; img.style.display = 'none'; placeholder.classList.remove('hidden'); }
+}
+
+/* =====================================================
+   編輯模式共用邏輯
+===================================================== */
+function enterEditMode(entityKey, idFieldEditable) {
+    document.getElementById(`${entityKey}-form-badge`).innerText = '編輯模式';
+    document.getElementById(`${entityKey}-form-badge`).classList.replace('new', 'edit');
+    document.getElementById(`${entityKey}-save-btn`).innerText = '更新';
+    document.getElementById(`${entityKey}-cancel-btn`).classList.remove('hidden');
+    const idInput = document.getElementById(`${entityKey}-id`);
+    if (idInput && !idFieldEditable) idInput.disabled = true;
+}
+
+window.cancelEdit = function (entityKey) {
+    editState[entityKey].editingId = null;
+    editState[entityKey].pendingFile = null;
+    document.getElementById(`${entityKey}-form`).reset();
+    resetImagePreview(entityKey);
+    document.getElementById(`${entityKey}-form-badge`).innerText = '新增模式';
+    document.getElementById(`${entityKey}-form-badge`).classList.replace('edit', 'new');
+    const saveLabels = { banners: '新增 Banner', tasks: '新增任務', news: '新增公告', badges: '新增徽章', certificates: '新增證書' };
+    document.getElementById(`${entityKey}-save-btn`).innerText = saveLabels[entityKey];
+    document.getElementById(`${entityKey}-cancel-btn`).classList.add('hidden');
+    const idInput = document.getElementById(`${entityKey}-id`);
+    if (idInput) idInput.disabled = false;
+    if (entityKey === 'banners') window.onBannerActionTypeChange();
+};
+
+/* =====================================================
+   Banner（data/banners.json，陣列）
+===================================================== */
+async function loadBannersList() {
+    const { data, sha } = await readJsonFile('data/banners.json', []);
+    editState.banners.items = data;
+    editState.banners.sha = sha;
+    renderBannersList();
+}
+
+function renderBannersList() {
+    const wrap = document.getElementById('banners-list');
+    const items = editState.banners.items;
+    if (items.length === 0) { wrap.innerHTML = `<p class="empty-note">尚無資料</p>`; return; }
+    wrap.innerHTML = items.map((b, i) => {
+        const range = [b.startAt ? new Date(b.startAt).toLocaleDateString() : '無期限', b.endAt ? new Date(b.endAt).toLocaleDateString() : '無期限'].join(' ~ ');
+        return `<div class="item-row ${b.isActive === false ? 'inactive' : ''}">
+            ${b.imageUrl ? `<img class="item-thumb" src="${b.imageUrl}">` : `<div class="item-thumb"></div>`}
+            <div class="item-info"><div class="item-title">${b.title}</div><div class="item-meta">${range} · ${b.isActive === false ? '已下架' : '上架中'}</div></div>
+            <div class="item-actions">
+                <button class="icon-btn edit" onclick="window.editBanner(${i})">編輯</button>
+                <button class="icon-btn toggle" onclick="window.toggleBannerActive(${i})">${b.isActive === false ? '上架' : '下架'}</button>
+                <button class="icon-btn danger" onclick="window.deleteBanner(${i})">刪除</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+window.onBannerActionTypeChange = function () {
+    const type = document.getElementById('banners-actionType').value;
+    document.getElementById('banners-actionValue-url-wrap').classList.toggle('hidden', type !== 'URL');
+    document.getElementById('banners-actionValue-task-wrap').classList.toggle('hidden', type !== 'TASK');
+};
+
+window.editBanner = function (index) {
+    const b = editState.banners.items[index];
+    document.getElementById('banners-title').value = b.title || '';
+    document.getElementById('banners-subtitle').value = b.subtitle || '';
+    document.getElementById('banners-sortOrder').value = b.sortOrder || 0;
+    document.getElementById('banners-startAt').value = msToDateValue(b.startAt);
+    document.getElementById('banners-endAt').value = msToDateValue(b.endAt);
+    document.getElementById('banners-actionType').value = b.actionType || 'NONE';
+    document.getElementById('banners-actionValue-url').value = b.actionType === 'URL' ? (b.actionValue || '') : '';
+    document.getElementById('banners-actionValue-task').value = b.actionType === 'TASK' ? (b.actionValue || '') : '';
+    window.onBannerActionTypeChange();
+    showExistingImage('banners', b.imageUrl);
+    enterEditMode('banners', true);
+    editState.banners.editingId = index;
+    document.getElementById('panel-banners').scrollIntoView({ behavior: 'smooth' });
+};
+
+window.toggleBannerActive = async function (index) {
+    editState.banners.items[index].isActive = editState.banners.items[index].isActive === false;
+    await saveBannersFile('切換 Banner 上下架狀態');
+};
+
+window.deleteBanner = async function (index) {
+    if (!confirm('確定要刪除嗎？此動作無法復原。')) return;
+    editState.banners.items.splice(index, 1);
+    await saveBannersFile('刪除 Banner');
+};
+
+async function saveBannersFile(message) {
+    try {
+        const result = await writeJsonFile('data/banners.json', editState.banners.items, editState.banners.sha, message);
+        editState.banners.sha = result.content.sha;
+        renderBannersList();
+        showMsg('banners', '已儲存');
+    } catch (err) {
+        showMsg('banners', err.message, true);
+        await loadBannersList(); // 版本可能衝突，重新讀取最新版本
+    }
+}
+
+window.submitBanner = async function (e) {
+    e.preventDefault();
+    try {
+        const editingIndex = editState.banners.editingId;
+        const existing = editingIndex !== null ? editState.banners.items[editingIndex] : null;
+        const imageUrl = await uploadPendingImage('banners', existing?.imageUrl);
+
+        const actionType = document.getElementById('banners-actionType').value;
+        const actionValue = actionType === 'URL' ? document.getElementById('banners-actionValue-url').value
+            : actionType === 'TASK' ? document.getElementById('banners-actionValue-task').value : null;
+
+        const data = {
+            title: document.getElementById('banners-title').value,
+            subtitle: document.getElementById('banners-subtitle').value || '',
+            imageUrl,
+            sortOrder: Number(document.getElementById('banners-sortOrder').value) || 0,
+            startAt: dateToMs(document.getElementById('banners-startAt').value),
+            endAt: dateToMs(document.getElementById('banners-endAt').value),
+            actionType, actionValue,
+            isActive: existing ? existing.isActive !== false : true
+        };
+
+        if (editingIndex !== null) {
+            editState.banners.items[editingIndex] = { ...existing, ...data };
+        } else {
+            editState.banners.items.push({ id: 'banner_' + Date.now(), ...data });
+        }
+
+        await saveBannersFile(editingIndex !== null ? '更新 Banner' : '新增 Banner');
+        window.cancelEdit('banners');
+    } catch (err) { showMsg('banners', err.message, true); }
+    return false;
+};
+
+/* =====================================================
+   任務（data/tasks.json，陣列，id 為固定鍵值）
+===================================================== */
+async function loadTasksList() {
+    const { data, sha } = await readJsonFile('data/tasks.json', []);
+    editState.tasks.items = data;
+    editState.tasks.sha = sha;
+    renderTasksList();
+    renderLeaderboardTaskOptions();
+}
+
+// 排行榜分頁的任務下拉選單，跟任務清單共用同一份資料，保持同步
+function renderLeaderboardTaskOptions() {
+    const select = document.getElementById('leaderboard-task-select');
+    if (!select) return;
+    const prevValue = select.value;
+    const items = editState.tasks.items;
+    select.innerHTML = items.length
+        ? `<option value="">請選擇任務</option>` + items.map(t => `<option value="${t.id}">${t.title}（${t.id}）</option>`).join('')
+        : `<option value="">尚無任務資料</option>`;
+    if (items.some(t => t.id === prevValue)) select.value = prevValue;
+}
+
+function renderTasksList() {
+    const wrap = document.getElementById('tasks-list');
+    const items = editState.tasks.items;
+    if (items.length === 0) { wrap.innerHTML = `<p class="empty-note">尚無資料</p>`; return; }
+    wrap.innerHTML = items.map((t, i) => `<div class="item-row ${t.isActive === false ? 'inactive' : ''}">
+        ${t.bannerUrl ? `<img class="item-thumb" src="${t.bannerUrl}">` : `<div class="item-thumb"></div>`}
+        <div class="item-info"><div class="item-title">${t.title} <span style="color:#999;font-weight:400;">(${t.id})</span></div>
+            <div class="item-meta">扣 ${t.entryCost || 0} 金幣 · ${t.isActive === false ? '已下架' : '上架中'} · ${t.hasLeaderboard === false ? '無排行榜' : '有排行榜'}</div></div>
+        <div class="item-actions">
+            <button class="icon-btn edit" onclick="window.editTask(${i})">編輯</button>
+            <button class="icon-btn toggle" onclick="window.toggleTaskActive(${i})">${t.isActive === false ? '上架' : '下架'}</button>
+            <button class="icon-btn danger" onclick="window.deleteTask(${i})">刪除</button>
+        </div>
+    </div>`).join('');
+}
+
+window.editTask = function (index) {
+    const t = editState.tasks.items[index];
+    document.getElementById('tasks-id').value = t.id;
+    document.getElementById('tasks-title').value = t.title || '';
+    document.getElementById('tasks-description').value = t.description || '';
+    document.getElementById('tasks-colorTheme').value = t.colorTheme || 'mint';
+    document.getElementById('tasks-sortOrder').value = t.sortOrder || 0;
+    document.getElementById('tasks-link').value = t.link || '';
+    document.getElementById('tasks-entryCost').value = t.entryCost || 0;
+    document.getElementById('tasks-hasLeaderboard').checked = t.hasLeaderboard !== false;
+    showExistingImage('tasks', t.bannerUrl);
+
+    document.getElementById('tasks-unlockLevel').value = '';
+    document.getElementById('tasks-unlockCoin').value = '';
+    document.getElementById('tasks-unlockBadges').value = '';
+    document.getElementById('tasks-unlockCerts').value = '';
+    document.getElementById('tasks-unlockStart').value = '';
+    document.getElementById('tasks-unlockEnd').value = '';
+    for (const c of t.unlockConditions || []) {
+        if (c.type === 'LEVEL') document.getElementById('tasks-unlockLevel').value = c.value;
+        if (c.type === 'COIN') document.getElementById('tasks-unlockCoin').value = c.value;
+        if (c.type === 'BADGE') document.getElementById('tasks-unlockBadges').value = (c.value || []).join(',');
+        if (c.type === 'CERTIFICATE') document.getElementById('tasks-unlockCerts').value = (c.value || []).join(',');
+        if (c.type === 'DATE') {
+            document.getElementById('tasks-unlockStart').value = msToDateValue(c.startDate);
+            document.getElementById('tasks-unlockEnd').value = msToDateValue(c.endDate);
+        }
+    }
+    enterEditMode('tasks', false);
+    editState.tasks.editingId = index;
+    document.getElementById('panel-tasks').scrollIntoView({ behavior: 'smooth' });
+};
+
+window.toggleTaskActive = async function (index) {
+    editState.tasks.items[index].isActive = editState.tasks.items[index].isActive === false;
+    await saveTasksFile('切換任務上下架狀態');
+};
+
+window.deleteTask = async function (index) {
+    if (!confirm('確定要刪除嗎？此動作無法復原。')) return;
+    editState.tasks.items.splice(index, 1);
+    await saveTasksFile('刪除任務');
+};
+
+async function saveTasksFile(message) {
+    try {
+        const result = await writeJsonFile('data/tasks.json', editState.tasks.items, editState.tasks.sha, message);
+        editState.tasks.sha = result.content.sha;
+        renderTasksList();
+        showMsg('tasks', '已儲存');
+    } catch (err) {
+        showMsg('tasks', err.message, true);
+        await loadTasksList();
+    }
+};
+
+window.submitTask = async function (e) {
+    e.preventDefault();
+    const id = document.getElementById('tasks-id').value.trim();
+    try {
+        const editingIndex = editState.tasks.editingId;
+        const existing = editingIndex !== null ? editState.tasks.items[editingIndex] : null;
+
+        if (editingIndex === null && editState.tasks.items.some(t => t.id === id)) {
+            showMsg('tasks', '此任務 ID 已存在，請換一個', true);
+            return false;
+        }
+
+        const conditions = [];
+        const lvl = document.getElementById('tasks-unlockLevel').value;
+        const coin = document.getElementById('tasks-unlockCoin').value;
+        const badgesStr = document.getElementById('tasks-unlockBadges').value;
+        const certsStr = document.getElementById('tasks-unlockCerts').value;
+        const startStr = document.getElementById('tasks-unlockStart').value;
+        const endStr = document.getElementById('tasks-unlockEnd').value;
+        if (lvl) conditions.push({ type: 'LEVEL', value: Number(lvl) });
+        if (coin) conditions.push({ type: 'COIN', value: Number(coin) });
+        if (badgesStr) conditions.push({ type: 'BADGE', value: badgesStr.split(',').map(s => s.trim()).filter(Boolean) });
+        if (certsStr) conditions.push({ type: 'CERTIFICATE', value: certsStr.split(',').map(s => s.trim()).filter(Boolean) });
+        if (startStr || endStr) conditions.push({ type: 'DATE', startDate: dateToMs(startStr) || 0, endDate: dateToMs(endStr) || 9999999999999 });
+
+        const bannerUrl = await uploadPendingImage('tasks', existing?.bannerUrl);
+        const data = {
+            id,
+            bannerUrl,
+            title: document.getElementById('tasks-title').value,
+            description: document.getElementById('tasks-description').value || '',
+            colorTheme: document.getElementById('tasks-colorTheme').value,
+            link: document.getElementById('tasks-link').value,
+            entryCost: Number(document.getElementById('tasks-entryCost').value) || 0,
+            unlockConditions: conditions,
+            sortOrder: Number(document.getElementById('tasks-sortOrder').value) || 0,
+            hasLeaderboard: document.getElementById('tasks-hasLeaderboard').checked,
+            isActive: existing ? existing.isActive !== false : true
+        };
+
+        if (editingIndex !== null) {
+            editState.tasks.items[editingIndex] = data;
+        } else {
+            editState.tasks.items.push(data);
+        }
+
+        await saveTasksFile(editingIndex !== null ? '更新任務' : '新增任務');
+        window.cancelEdit('tasks');
+    } catch (err) { showMsg('tasks', err.message, true); }
+    return false;
+};
+
+/* =====================================================
+   商店品項（data/shopItems.json，陣列）
+   做法比照任務清單（isActive/sortOrder），圖片上傳比照徽章/證書字典。
+===================================================== */
+async function loadShopItemsList() {
+    const { data, sha } = await readJsonFile('data/shopItems.json', []);
+    editState.shopItems.items = data;
+    editState.shopItems.sha = sha;
+    renderShopItemsList();
+}
+
+function renderShopItemsList() {
+    const wrap = document.getElementById('shopItems-list');
+    const items = editState.shopItems.items;
+    if (items.length === 0) { wrap.innerHTML = `<p class="empty-note">尚無資料</p>`; return; }
+    wrap.innerHTML = items.map((it, i) => `<div class="item-row ${it.isActive === false ? 'inactive' : ''}">
+        ${it.iconUrl ? `<img class="item-thumb" src="${it.iconUrl}">` : `<div class="item-thumb"></div>`}
+        <div class="item-info"><div class="item-title">${escapeHtml(it.name)} <span style="color:#999;font-weight:400;">(${it.id})</span></div>
+            <div class="item-meta">${it.cost || 0} 金幣 · ${it.isActive === false ? '已下架' : '上架中'}</div></div>
+        <div class="item-actions">
+            <button class="icon-btn edit" onclick="window.editShopItem(${i})">編輯</button>
+            <button class="icon-btn toggle" onclick="window.toggleShopItemActive(${i})">${it.isActive === false ? '上架' : '下架'}</button>
+            <button class="icon-btn danger" onclick="window.deleteShopItem(${i})">刪除</button>
+        </div>
+    </div>`).join('');
+}
+
+window.editShopItem = function (index) {
+    const it = editState.shopItems.items[index];
+    document.getElementById('shopItems-id').value = it.id;
+    document.getElementById('shopItems-name').value = it.name || '';
+    document.getElementById('shopItems-description').value = it.description || '';
+    document.getElementById('shopItems-cost').value = it.cost || 0;
+    document.getElementById('shopItems-sortOrder').value = it.sortOrder || 0;
+    showExistingImage('shopItems', it.iconUrl);
+    enterEditMode('shopItems', false);
+    editState.shopItems.editingId = index;
+    document.getElementById('panel-shopItems').scrollIntoView({ behavior: 'smooth' });
+};
+
+window.toggleShopItemActive = async function (index) {
+    editState.shopItems.items[index].isActive = editState.shopItems.items[index].isActive === false;
+    await saveShopItemsFile('切換商店品項上下架狀態');
+};
+
+window.deleteShopItem = async function (index) {
+    if (!confirm('確定要刪除嗎？此動作無法復原。')) return;
+    editState.shopItems.items.splice(index, 1);
+    await saveShopItemsFile('刪除商店品項');
+};
+
+async function saveShopItemsFile(message) {
+    try {
+        const result = await writeJsonFile('data/shopItems.json', editState.shopItems.items, editState.shopItems.sha, message);
+        editState.shopItems.sha = result.content.sha;
+        renderShopItemsList();
+        showMsg('shopItems', '已儲存');
+    } catch (err) {
+        showMsg('shopItems', err.message, true);
+        await loadShopItemsList();
+    }
+};
+
+window.submitShopItem = async function (e) {
+    e.preventDefault();
+    const id = document.getElementById('shopItems-id').value.trim();
+    try {
+        const editingIndex = editState.shopItems.editingId;
+        const existing = editingIndex !== null ? editState.shopItems.items[editingIndex] : null;
+
+        if (editingIndex === null && editState.shopItems.items.some(it => it.id === id)) {
+            showMsg('shopItems', '此品項 ID 已存在，請換一個', true);
+            return false;
+        }
+
+        const iconUrl = await uploadPendingImage('shopItems', existing?.iconUrl);
+        const data = {
+            id,
+            name: document.getElementById('shopItems-name').value,
+            description: document.getElementById('shopItems-description').value || '',
+            iconUrl,
+            cost: Number(document.getElementById('shopItems-cost').value) || 0,
+            sortOrder: Number(document.getElementById('shopItems-sortOrder').value) || 0,
+            isActive: existing ? existing.isActive !== false : true
+        };
+
+        if (editingIndex !== null) {
+            editState.shopItems.items[editingIndex] = data;
+        } else {
+            editState.shopItems.items.push(data);
+        }
+
+        await saveShopItemsFile(editingIndex !== null ? '更新商店品項' : '新增商店品項');
+        window.cancelEdit('shopItems');
+    } catch (err) { showMsg('shopItems', err.message, true); }
+    return false;
+};
+
+/* =====================================================
+   公告（data/news.json，陣列）
+===================================================== */
+async function loadNewsList() {
+    const { data, sha } = await readJsonFile('data/news.json', []);
+    editState.news.items = data;
+    editState.news.sha = sha;
+    renderNewsList();
+}
+
+function renderNewsList() {
+    const wrap = document.getElementById('news-list');
+    const items = editState.news.items;
+    if (items.length === 0) { wrap.innerHTML = `<p class="empty-note">尚無資料</p>`; return; }
+    wrap.innerHTML = items.map((n, i) => {
+        const range = [n.startAt ? new Date(n.startAt).toLocaleDateString() : '無期限', n.endAt ? new Date(n.endAt).toLocaleDateString() : '無期限'].join(' ~ ');
+        return `<div class="item-row"><div class="item-thumb"></div>
+            <div class="item-info"><div class="item-title">${n.title}</div><div class="item-meta">${range}</div></div>
+            <div class="item-actions">
+                <button class="icon-btn edit" onclick="window.editNews(${i})">編輯</button>
+                <button class="icon-btn danger" onclick="window.deleteNews(${i})">刪除</button>
+            </div></div>`;
+    }).join('');
+}
+
+window.editNews = function (index) {
+    const n = editState.news.items[index];
+    document.getElementById('news-title').value = n.title || '';
+    document.getElementById('news-content').value = n.content || '';
+    document.getElementById('news-startAt').value = msToDateValue(n.startAt);
+    document.getElementById('news-endAt').value = msToDateValue(n.endAt);
+    enterEditMode('news', true);
+    editState.news.editingId = index;
+    document.getElementById('panel-news').scrollIntoView({ behavior: 'smooth' });
+};
+
+window.deleteNews = async function (index) {
+    if (!confirm('確定要刪除嗎？此動作無法復原。')) return;
+    editState.news.items.splice(index, 1);
+    await saveNewsFile('刪除公告');
+};
+
+async function saveNewsFile(message) {
+    try {
+        const result = await writeJsonFile('data/news.json', editState.news.items, editState.news.sha, message);
+        editState.news.sha = result.content.sha;
+        renderNewsList();
+        showMsg('news', '已儲存');
+    } catch (err) {
+        showMsg('news', err.message, true);
+        await loadNewsList();
+    }
+}
+
+window.submitNews = async function (e) {
+    e.preventDefault();
+    try {
+        const editingIndex = editState.news.editingId;
+        const data = {
+            title: document.getElementById('news-title').value,
+            content: document.getElementById('news-content').value || '',
+            startAt: dateToMs(document.getElementById('news-startAt').value),
+            endAt: dateToMs(document.getElementById('news-endAt').value)
+        };
+
+        if (editingIndex !== null) {
+            const existing = editState.news.items[editingIndex];
+            editState.news.items[editingIndex] = { ...existing, ...data };
+        } else {
+            editState.news.items.push({ id: 'news_' + Date.now(), publishedAt: Date.now(), ...data });
+        }
+
+        await saveNewsFile(editingIndex !== null ? '更新公告' : '新增公告');
+        window.cancelEdit('news');
+    } catch (err) { showMsg('news', err.message, true); }
+    return false;
+};
+
+/* =====================================================
+   徽章 / 證書（data/badges.json、data/certificates.json，物件字典）
+===================================================== */
+async function loadDictList(coll) {
+    const { data, sha } = await readJsonFile(`data/${coll}.json`, {});
+    editState[coll].items = data;
+    editState[coll].sha = sha;
+    renderDictList(coll);
+}
+
+function renderDictList(coll) {
+    const wrap = document.getElementById(`${coll}-list`);
+    const items = editState[coll].items;
+    const ids = Object.keys(items);
+    if (ids.length === 0) { wrap.innerHTML = `<p class="empty-note">尚無資料</p>`; return; }
+    wrap.innerHTML = ids.map(id => {
+        const b = items[id];
+        return `<div class="item-row">
+            ${b.iconUrl ? `<img class="item-thumb" src="${b.iconUrl}">` : `<div class="item-thumb"></div>`}
+            <div class="item-info"><div class="item-title">${b.name} <span style="color:#999;font-weight:400;">(${id})</span></div>
+                <div class="item-meta">來源任務：${b.sourceTaskId || '（未設定）'}</div></div>
+            <div class="item-actions">
+                <button class="icon-btn edit" onclick="window.editDict('${coll}','${id}')">編輯</button>
+                <button class="icon-btn danger" onclick="window.deleteDict('${coll}','${id}')">刪除</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+window.editDict = function (coll, id) {
+    const b = editState[coll].items[id];
+    document.getElementById(`${coll}-id`).value = id;
+    document.getElementById(`${coll}-name`).value = b.name || '';
+    document.getElementById(`${coll}-description`).value = b.description || '';
+    document.getElementById(`${coll}-sourceTaskId`).value = b.sourceTaskId || '';
+    document.getElementById(`${coll}-weight`).value = b.weight ?? 1;
+    showExistingImage(coll, b.iconUrl);
+    enterEditMode(coll, false);
+    editState[coll].editingId = id;
+    document.getElementById(`panel-${coll}`).scrollIntoView({ behavior: 'smooth' });
+};
+
+window.deleteDict = async function (coll, id) {
+    if (!confirm('確定要刪除嗎？此動作無法復原。')) return;
+    delete editState[coll].items[id];
+    await saveDictFile(coll, `刪除 ${coll} ${id}`);
+};
+
+async function saveDictFile(coll, message) {
+    try {
+        const result = await writeJsonFile(`data/${coll}.json`, editState[coll].items, editState[coll].sha, message);
+        editState[coll].sha = result.content.sha;
+        renderDictList(coll);
+        showMsg(coll, '已儲存');
+    } catch (err) {
+        showMsg(coll, err.message, true);
+        await loadDictList(coll);
+    }
+}
+
+async function submitDict(coll, e) {
+    e.preventDefault();
+    const id = document.getElementById(`${coll}-id`).value.trim();
+    try {
+        const editingId = editState[coll].editingId;
+        const existing = editingId ? editState[coll].items[editingId] : null;
+
+        if (!editingId && editState[coll].items[id]) {
+            showMsg(coll, '此 ID 已存在，請換一個', true);
+            return false;
+        }
+
+        const iconUrl = await uploadPendingImage(coll, existing?.iconUrl);
+        editState[coll].items[id] = {
+            name: document.getElementById(`${coll}-name`).value,
+            description: document.getElementById(`${coll}-description`).value || '',
+            iconUrl,
+            sourceTaskId: document.getElementById(`${coll}-sourceTaskId`).value || '',
+            weight: Number(document.getElementById(`${coll}-weight`).value) || 1
+        };
+
+        await saveDictFile(coll, editingId ? `更新 ${coll} ${id}` : `新增 ${coll} ${id}`);
+        window.cancelEdit(coll);
+    } catch (err) { showMsg(coll, err.message, true); }
+    return false;
+}
+window.submitBadge = (e) => submitDict('badges', e);
+window.submitCertificate = (e) => submitDict('certificates', e);
+
+/* =====================================================
+   一次性載入所有內容清單
+===================================================== */
+async function loadAllContentLists() {
+    await Promise.all([
+        loadBannersList(), loadTasksList(), loadNewsList(),
+        loadDictList('badges'), loadDictList('certificates'), loadShopItemsList(),
+        loadSettingsAdmin()
+    ]);
+}
+
+// 平台參數設定：每日登入贈送金幣數、升等所需加權物件數。單一物件的設定檔，
+// 不是清單，所以不用套用其他內容那套「新增/編輯/刪除個別項目」的介面，
+// 就是一個簡單表單、兩個數字欄位、存檔直接整份覆寫。
+async function loadSettingsAdmin() {
+    const { data, sha } = await readJsonFile('data/settings.json', { dailyLoginCoins: 10, levelStep: 25 });
+    editState.settings.data = data;
+    editState.settings.sha = sha;
+    renderSettingsForm();
+}
+
+function renderSettingsForm() {
+    const area = document.getElementById('settings-form-area');
+    if (!area) return;
+    const s = editState.settings.data;
+    area.innerHTML = `
+        <form class="entity-form" onsubmit="return window.submitSettings(event)">
+            <div class="two-col">
+                <div class="field"><label>每日登入贈送金幣數</label><input name="dailyLoginCoins" type="number" min="0" value="${s.dailyLoginCoins}"></div>
+                <div class="field"><label>升等所需加權物件數</label><input name="levelStep" type="number" min="1" value="${s.levelStep}"></div>
+            </div>
+            <p style="font-size:11px;color:#8B8577;margin:-4px 0 10px;line-height:1.6;">
+                「升等所需」是背包裡徽章+證書的加權總數每滿這個數字就升一級（權重讀各徽章/證書自己的 weight 欄位）。
+                這兩個值玩家端有做快取，改完之後玩家要重新整理頁面（或等快取過期）才會套用到新的值，不是存檔當下全部人立刻更新。
+            </p>
+            <div class="field">
+                <label>確認碼</label>
+                <input name="confirmCode" type="password" autocomplete="off" placeholder="這兩個數字牽動全平台的金幣/等級規則，存檔前需要輸入確認碼">
+            </div>
+            <button class="btn-save" type="submit">儲存設定</button>
+        </form>`;
+}
+
+// 這兩個數字改動範圍是「全平台所有玩家」，存檔前多一道確認碼防呆，避免手滑誤觸。
+// 目前先寫死在這裡、不提供從介面更改，之後如果要開放改確認碼再另外處理。
+const SETTINGS_CONFIRM_CODE = 'huansia30';
+
+window.submitSettings = async function (e) {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    if (f.get('confirmCode') !== SETTINGS_CONFIRM_CODE) {
+        showMsg('settings', '確認碼錯誤，未儲存', true);
+        return false;
+    }
+    const data = {
+        dailyLoginCoins: Number(f.get('dailyLoginCoins')),
+        levelStep: Number(f.get('levelStep'))
+    };
+    try {
+        const res = await writeJsonFile('data/settings.json', data, editState.settings.sha, '後台更新平台設定');
+        editState.settings.data = data;
+        editState.settings.sha = res.content.sha;
+        showMsg('settings', '已儲存');
+    } catch (err) {
+        showMsg('settings', err.message, true);
+    }
+    return false;
+};
+
+/* =====================================================
+   使用者資料編修（維持 Firebase Google 登入 + Firestore）
+===================================================== */
+window.handleGoogleLogin = async function () {
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+    catch (err) { document.getElementById('users-login-error').innerText = err.message; }
+};
+window.handleGoogleLogout = async function () { await signOut(auth); };
+
+window.searchUser = async function (e) {
+    e.preventDefault();
+    const username = document.getElementById('user-search-input').value.trim().toLowerCase();
+    await loadUserIntoForm(username);
+    return false;
+};
+
+// 直接用 uid 載入（清單點擊用，不用再多查一次 usernames）
+async function loadUserByUid(uid) {
+    const area = document.getElementById('user-edit-area');
+    area.innerHTML = '查詢中...';
+    const userSnap = await getDoc(doc(db, 'users', uid));
+    if (!userSnap.exists()) { area.innerHTML = '<p style="font-size:13px;">查無使用者資料</p>'; return; }
+    renderUserEditForm(uid, userSnap.data());
+}
+
+async function loadUserIntoForm(username) {
+    const area = document.getElementById('user-edit-area');
+    area.innerHTML = '查詢中...';
+    const unameSnap = await getDoc(doc(db, 'usernames', username));
+    if (!unameSnap.exists()) { area.innerHTML = '<p style="font-size:13px;">查無此使用者</p>'; return; }
+    await loadUserByUid(unameSnap.data().uid);
+}
+
+// 等級純計算，做法跟 js/main.js 的 computeLevel 一致：背包物件（徽章+證書）加權合計，
+// 每 N 個升一級，N 讀 editState.settings（來自 data/settings.json），跟玩家端讀同一份設定，
+// 兩邊才不會算出不一樣的等級。
+// 後台不再提供手動改等級的欄位（改了也會被這個算出來的值蓋掉，保留只會誤導管理者）。
+function computeLevelAdmin(u) {
+    const badges = editState.badges.items || {};
+    const certificates = editState.certificates.items || {};
+    const badgeWeight = (u.badges || []).reduce((sum, id) => sum + (badges[id]?.weight ?? 1), 0);
+    const certWeight = (u.certificates || []).reduce((sum, id) => sum + (certificates[id]?.weight ?? 1), 0);
+    const levelStep = editState.settings?.data?.levelStep ?? 25;
+    return Math.floor((badgeWeight + certWeight) / levelStep) + 1;
+}
+
+// ── 徽章／證書挑選器：取代原本「逗號分隔ID」文字框 ──
+// 用一個全域狀態記著「目前這個使用者表單上，勾選了哪些徽章/證書」，
+// 因為 chip 是動態增減的，不像一般表單欄位可以直接用 FormData 讀出來。
+window.__userEditPicked = { badges: [], certificates: [] };
+
+function renderChipPicker(coll) {
+    const listEl = document.getElementById(`user-${coll}-chips`);
+    const items = editState[coll].items || {};
+    const picked = window.__userEditPicked[coll];
+    if (!listEl) return;
+    listEl.innerHTML = picked.map(id => {
+        const info = items[id];
+        const name = info ? info.name : `（找不到定義：${id}）`;
+        return `<span class="chip">
+            ${info?.iconUrl ? `<img src="${info.iconUrl}">` : ''}
+            <span>${escapeHtml(name)}</span>
+            <button type="button" class="chip-remove" onclick="window.userPickerRemove('${coll}','${id}')">✕</button>
+        </span>`;
+    }).join('');
+}
+
+window.userPickerRemove = function (coll, id) {
+    window.__userEditPicked[coll] = window.__userEditPicked[coll].filter(x => x !== id);
+    renderChipPicker(coll);
+};
+
+window.userPickerAdd = function (coll, id) {
+    if (!window.__userEditPicked[coll].includes(id)) window.__userEditPicked[coll].push(id);
+    renderChipPicker(coll);
+    const input = document.getElementById(`user-${coll}-search`);
+    if (input) input.value = '';
+    document.getElementById(`user-${coll}-results`).innerHTML = '';
+};
+
+// 打字即時搜尋：用名稱或 ID 比對，已經勾選的不會再出現在搜尋結果裡，
+// 免得同一個不小心加兩次（雖然 userPickerAdd 本身也擋重複，這裡先濾掉體驗更好）。
+window.userPickerSearch = function (coll, query) {
+    const resultsEl = document.getElementById(`user-${coll}-results`);
+    const q = query.trim().toLowerCase();
+    if (!q) { resultsEl.innerHTML = ''; return; }
+    const items = editState[coll].items || {};
+    const picked = window.__userEditPicked[coll];
+    const matches = Object.keys(items)
+        .filter(id => !picked.includes(id))
+        .filter(id => id.toLowerCase().includes(q) || (items[id].name || '').toLowerCase().includes(q))
+        .slice(0, 30); // 避免徽章一多，搜尋結果一次全塞出來卡畫面
+    if (!matches.length) { resultsEl.innerHTML = `<div class="chip-search-empty">找不到符合的項目</div>`; return; }
+    resultsEl.innerHTML = matches.map(id => {
+        const info = items[id];
+        return `<div class="result-row" onclick="window.userPickerAdd('${coll}','${id}')">
+            ${info.iconUrl ? `<img src="${info.iconUrl}">` : ''}
+            <span>${escapeHtml(info.name)}</span>
+            <span class="result-meta">${escapeHtml(info.sourceTaskId || '')}</span>
+        </div>`;
+    }).join('');
+};
+
+function renderUserEditForm(uid, u) {
+    const area = document.getElementById('user-edit-area');
+    window.__userEditPicked = { badges: [...(u.badges || [])], certificates: [...(u.certificates || [])] };
+    area.innerHTML = `
+        <form class="entity-form" onsubmit="return window.submitUserEdit(event, '${uid}')">
+            <div class="field"><label>暱稱</label><input name="nickname" value="${escapeHtml(u.nickname || '')}"></div>
+            <div class="two-col">
+                <div class="field"><label>等級（自動計算，不可手動改）</label><input value="Lv.${computeLevelAdmin(u)}" disabled style="opacity:0.7;"></div>
+                <div class="field"><label>通行金幣</label><input name="coins" type="number" value="${u.coins ?? 0}"></div>
+            </div>
+            <div class="field">
+                <label>徽章</label>
+                <div class="chip-picker">
+                    <div class="chip-list" id="user-badges-chips"></div>
+                    <div class="chip-search-wrap">
+                        <input id="user-badges-search" placeholder="輸入名稱搜尋要新增的徽章…" oninput="window.userPickerSearch('badges', this.value)">
+                        <div class="chip-search-results" id="user-badges-results"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="field">
+                <label>證書</label>
+                <div class="chip-picker">
+                    <div class="chip-list" id="user-certificates-chips"></div>
+                    <div class="chip-search-wrap">
+                        <input id="user-certificates-search" placeholder="輸入名稱搜尋要新增的證書…" oninput="window.userPickerSearch('certificates', this.value)">
+                        <div class="chip-search-results" id="user-certificates-results"></div>
+                    </div>
+                </div>
+            </div>
+            <button class="btn-save" type="submit">儲存變更</button>
+        </form>
+        <div style="margin-top:20px;border-top:1px solid #E5DFD3;padding-top:14px;">
+            <h3 style="font-size:14px;margin:0 0 8px;">此玩家的排行榜成績</h3>
+            <p style="font-size:11px;color:#8B8577;margin:-4px 0 8px;">直接用 uid 查每個任務有沒有這個玩家的紀錄，不需要搜尋、也不受改暱稱影響。</p>
+            <div id="user-leaderboard-list" class="empty-note">載入中...</div>
+            <div id="user-leaderboard-edit-area" style="margin-top:12px;"></div>
+        </div>
+        <div style="margin-top:20px;border-top:2px solid #A63D40;padding-top:14px;">
+            <h3 style="font-size:14px;margin:0 0 6px;color:#A63D40;">⚠️ 危險區域</h3>
+            <p style="font-size:11px;color:#8B8577;margin:0 0 10px;line-height:1.6;">
+                只會刪除 Firestore 裡的資料（個人資料、金幣明細、商店兌換紀錄、各任務排行榜成績、使用者名稱保留紀錄）。
+                <strong>不會刪除 Firebase Auth 的登入帳號</strong>——那組帳號密碼理論上還能登入，只是登入後資料全空。
+                真的要讓這個帳號徹底消失、名稱可以被重新註冊，還要自己另外去 Firebase 主控台的 Authentication
+                頁面手動刪除這個使用者的 Auth 帳號。此動作無法復原。
+            </p>
+            <button class="icon-btn danger" onclick="window.deleteUserAccount('${uid}', '${escapeHtml(u.nickname || '').replace(/'/g, "\\'")}')">刪除此玩家的 Firestore 資料</button>
+        </div>`;
+    renderChipPicker('badges');
+    renderChipPicker('certificates');
+    renderUserLeaderboardTrigger(uid);
+}
+
+// 用這個玩家的 uid，逐一比對每個任務底下有沒有他的排行榜紀錄（直接 getDoc 點查，不是搜尋，不怕改名字或打錯字）
+// 排行榜成績改成按鈕觸發才查（原本一開啟玩家資料就自動查全部任務，每個任務1次讀取，
+// 不管管理者有沒有要看都白白先查了；現在只有真的點下去才查，多數情況下只是想看
+// 金幣/徽章就不用順便花掉這 N 次讀取）
+function renderUserLeaderboardTrigger(uid) {
+    const listEl = document.getElementById('user-leaderboard-list');
+    if (!listEl) return;
+    listEl.innerHTML = `<button class="icon-btn" onclick="window.loadUserLeaderboardEntriesNow('${uid}')">載入排行榜成績</button>`;
+}
+window.loadUserLeaderboardEntriesNow = function (uid) { loadUserLeaderboardEntries(uid); };
+
+async function loadUserLeaderboardEntries(uid) {
+    const listEl = document.getElementById('user-leaderboard-list');
+    if (!listEl) return;
+    const tasks = editState.tasks.items;
+    if (!tasks.length) {
+        listEl.innerHTML = `<p class="empty-note">尚無任務資料（請確認 GitHub 連線已設定並已載入任務清單）</p>`;
+        return;
+    }
+    listEl.innerHTML = '載入中...';
+    try {
+        const results = await Promise.all(tasks.map(async (t) => {
+            const snap = await getDoc(doc(db, 'leaderboard', t.id, 'entries', uid));
+            return snap.exists() ? { taskId: t.id, taskTitle: t.title, ...snap.data() } : null;
+        }));
+        const rows = results.filter(Boolean);
+        window.__userLbRowsCache = rows;
+        if (!rows.length) { listEl.innerHTML = `<p class="empty-note">這位玩家目前沒有任何排行榜紀錄</p>`; return; }
+        listEl.innerHTML = rows.map(r => `
+            <div class="item-row">
+                <div class="item-info">
+                    <div class="item-title">${escapeHtml(r.taskTitle)}</div>
+                    <div class="item-meta">${escapeHtml(r.scoreLabel || '')}（${r.scoreValue} 分）${r.updatedAt ? ' · ' + new Date(r.updatedAt).toLocaleString() : ''}</div>
+                </div>
+                <div class="item-actions">
+                    <button class="icon-btn edit" onclick="window.editUserLeaderboardEntry('${r.taskId}','${uid}')">編輯</button>
+                    <button class="icon-btn danger" onclick="window.deleteUserLeaderboardEntry('${r.taskId}','${uid}')">刪除</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        listEl.innerHTML = `<p class="empty-note">載入失敗：${err.message}</p>`;
+    }
+}
+
+window.editUserLeaderboardEntry = function (taskId, uid) {
+    const row = (window.__userLbRowsCache || []).find(r => r.taskId === taskId);
+    if (!row) return;
+    const area = document.getElementById('user-leaderboard-edit-area');
+    area.innerHTML = `
+        <form class="entity-form" onsubmit="return window.submitUserLeaderboardEdit(event, '${taskId}', '${uid}')">
+            <h3 style="margin:0 0 8px;font-size:14px;">編輯：${escapeHtml(row.taskTitle)}</h3>
+            <div class="field"><label>顯示用分數字串</label><input name="scoreLabel" value="${escapeHtml(row.scoreLabel || '')}"></div>
+            <div class="field"><label>排序用數字分數</label><input name="scoreValue" type="number" value="${row.scoreValue ?? 0}" required></div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn-save" type="submit">儲存變更</button>
+                <button type="button" class="btn-cancel" onclick="document.getElementById('user-leaderboard-edit-area').innerHTML=''">取消</button>
+            </div>
+        </form>`;
+};
+
+window.submitUserLeaderboardEdit = async function (e, taskId, uid) {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+        await updateDoc(doc(db, 'leaderboard', taskId, 'entries', uid), {
+            scoreLabel: f.get('scoreLabel'),
+            scoreValue: Number(f.get('scoreValue')),
+            updatedAt: Date.now()
+        });
+        showMsg('users', '已儲存');
+        document.getElementById('user-leaderboard-edit-area').innerHTML = '';
+        loadUserLeaderboardEntries(uid);
+    } catch (err) { showMsg('users', err.message, true); }
+    return false;
+};
+
+window.deleteUserLeaderboardEntry = async function (taskId, uid) {
+    const row = (window.__userLbRowsCache || []).find(r => r.taskId === taskId);
+    const taskTitle = row?.taskTitle || taskId;
+    if (!confirm(`確定要刪除「${taskTitle}」這筆排行榜紀錄嗎？`)) return;
+    try {
+        await deleteDoc(doc(db, 'leaderboard', taskId, 'entries', uid));
+        showMsg('users', '已刪除');
+        loadUserLeaderboardEntries(uid);
+    } catch (err) { showMsg('users', err.message, true); }
+};
+
+// 瀏覽全部使用者（Firestore users collection 目前設定任何人可讀，
+// 這裡仍限定要先通過管理者 Google 登入才看得到這個畫面）
+window.loadUsersList = async function () {
+    const listEl = document.getElementById('users-list');
+    const loadingEl = document.getElementById('users-list-loading');
+    loadingEl.classList.remove('hidden');
+    listEl.innerHTML = '';
+    try {
+        const snap = await getDocs(collection(db, 'users'));
+        loadingEl.classList.add('hidden');
+        if (snap.empty) { listEl.innerHTML = `<p class="empty-note">目前沒有任何使用者</p>`; return; }
+        const rows = snap.docs
+            .map(d => ({ uid: d.id, ...d.data() }))
+            .sort((a, b) => (a.nickname || '').localeCompare(b.nickname || ''));
+        listEl.innerHTML = rows.map(u => `
+            <div class="item-row" data-uid="${u.uid}">
+                <div class="item-thumb"></div>
+                <div class="item-info">
+                    <div class="item-title">${escapeHtml(u.nickname || '（未命名）')}</div>
+                    <div class="item-meta">Lv.${computeLevelAdmin(u)} · ${u.coins ?? 0} 金幣</div>
+                </div>
+                <div class="item-actions">
+                    <button class="icon-btn edit" onclick="window.loadUserByUidFromList('${u.uid}')">編輯</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        loadingEl.classList.add('hidden');
+        listEl.innerHTML = `<p class="empty-note">載入失敗：${err.message}</p>`;
+    }
+};
+
+window.loadUserByUidFromList = function (uid) { loadUserByUid(uid); };
+
+// 存檔後只更新左側清單裡「這一列」的顯示（暱稱/等級/金幣），不必為了同步這一筆
+// 就重新整包讀取全部使用者——那樣的成本是 N 次讀取（N=目前使用者總數），
+// 只是想更新自己剛存的這一筆，完全不需要付出這個代價。
+// 如果這個使用者原本不在目前清單裡（例如清單還沒載入過、或這是全新註冊的帳號），
+// 就地更新會找不到對應的列，這時候才退回原本整包重讀的做法。
+function updateUserRowLocally(uid, patch) {
+    const row = document.querySelector(`#users-list .item-row[data-uid="${uid}"]`);
+    if (!row) { window.loadUsersList(); return; }
+    if (patch.nickname !== undefined) {
+        row.querySelector('.item-title').textContent = patch.nickname || '（未命名）';
+    }
+    if (patch.coins !== undefined || patch.level !== undefined) {
+        row.querySelector('.item-meta').textContent = `Lv.${patch.level} · ${patch.coins} 金幣`;
+    }
+}
+
+window.submitUserEdit = async function (e, uid) {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const nickname = f.get('nickname');
+    const coins = Number(f.get('coins'));
+    const badges = [...window.__userEditPicked.badges];
+    const certificates = [...window.__userEditPicked.certificates];
+    try {
+        await updateDoc(doc(db, 'users', uid), { nickname, coins, badges, certificates });
+        showMsg('users', '已儲存');
+        const level = computeLevelAdmin({ badges, certificates });
+        updateUserRowLocally(uid, { nickname, coins, level });
+    } catch (err) { showMsg('users', err.message, true); }
+    return false;
+};
+
+// 刪除玩家：只清 Firestore 資料（個人資料、金幣明細、商店兌換紀錄、各任務排行榜成績、
+// 使用者名稱保留紀錄），不會、也沒辦法刪除 Firebase Auth 帳號本身（client SDK 沒有這個
+// 權限，只能刪除「目前登入中的自己」），要徹底刪帳號、讓名稱能被重新註冊，需要另外去
+// Firebase 主控台的 Authentication 頁面手動刪除。此動作無法復原，所以要求輸入暱稱二次確認。
+window.deleteUserAccount = async function (uid, nickname) {
+    if (!confirm(`確定要刪除「${nickname}」這個玩家嗎？\n\n此動作只會清空 Firestore 資料，無法復原。`)) return;
+    const typed = prompt(`請輸入這個玩家的暱稱「${nickname}」以確認刪除：`);
+    if (typed !== nickname) {
+        if (typed !== null) alert('輸入的暱稱不符，已取消刪除');
+        return;
+    }
+
+    try {
+        showMsg('users', '刪除中…');
+
+        // 逐一檢查每個任務底下有沒有這個玩家的排行榜紀錄，有就刪（沒有的話 deleteDoc 對不存在
+        // 的文件也是安全的無動作，不會報錯）
+        const tasks = editState.tasks.items || [];
+        await Promise.all(tasks.map(t => deleteDoc(doc(db, 'leaderboard', t.id, 'entries', uid)).catch(() => {})));
+
+        // 清空金幣明細、商店兌換紀錄這兩個子集合
+        const [ledgerSnap, redemptionsSnap] = await Promise.all([
+            getDocs(collection(db, 'coinLedger', uid, 'entries')),
+            getDocs(collection(db, 'shopRedemptions', uid, 'entries'))
+        ]);
+        await Promise.all([
+            ...ledgerSnap.docs.map(d => deleteDoc(d.ref)),
+            ...redemptionsSnap.docs.map(d => deleteDoc(d.ref))
+        ]);
+
+        // 釋出使用者名稱保留紀錄（注意：Auth 帳號本身還在，這個名稱換算出來的內部信箱
+        // 依然被那組舊帳號佔用，實際上還是沒辦法被別人重新註冊，除非連 Auth 帳號都手動刪了）
+        await deleteDoc(doc(db, 'usernames', nickname.toLowerCase())).catch(() => {});
+
+        // 最後才刪個人資料本體
+        await deleteDoc(doc(db, 'users', uid));
+
+        showMsg('users', '已刪除此玩家的 Firestore 資料');
+        document.getElementById('user-edit-area').innerHTML = '';
+        const row = document.querySelector(`#users-list .item-row[data-uid="${uid}"]`);
+        if (row) row.remove(); else window.loadUsersList();
+    } catch (err) {
+        showMsg('users', '刪除失敗：' + err.message, true);
+    }
+};
+
+/* =====================================================
+   排行榜管理（維持 Firebase Google 登入 + Firestore，跟使用者資料編修共用同一組登入狀態）
+   顯示前 20 名（跟前台排行榜卡片概念一致），「清空」則不受這個限制、抓全部筆數刪除。
+===================================================== */
+window.loadLeaderboardList = async function () {
+    const taskId = document.getElementById('leaderboard-task-select').value;
+    const listEl = document.getElementById('leaderboard-list');
+    const loadingEl = document.getElementById('leaderboard-list-loading');
+    document.getElementById('leaderboard-edit-area').innerHTML = '';
+    if (!taskId) { listEl.innerHTML = ''; return; }
+
+    loadingEl.classList.remove('hidden');
+    listEl.innerHTML = '';
+    try {
+        const snap = await getDocs(query(
+            collection(db, 'leaderboard', taskId, 'entries'),
+            orderBy('scoreValue', 'desc'),
+            limit(20)
+        ));
+        loadingEl.classList.add('hidden');
+        if (snap.empty) { listEl.innerHTML = `<p class="empty-note">這個任務目前沒有任何排行榜紀錄</p>`; return; }
+
+        const rows = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
+        listEl.innerHTML = rows.map((r, i) => `
+            <div class="item-row">
+                <div class="item-info">
+                    <div class="item-title">#${i + 1}　${escapeHtml(r.playerName || '（未命名）')}</div>
+                    <div class="item-meta">${escapeHtml(r.scoreLabel || '')}（${r.scoreValue} 分）${r.updatedAt ? ' · ' + new Date(r.updatedAt).toLocaleString() : ''}</div>
+                </div>
+                <div class="item-actions">
+                    <button class="icon-btn edit" onclick="window.editLeaderboardEntry('${taskId}','${r.uid}')">編輯</button>
+                    <button class="icon-btn danger" onclick="window.deleteLeaderboardEntry('${taskId}','${r.uid}')">刪除</button>
+                </div>
+            </div>
+        `).join('');
+
+        // 編輯用的原始資料另外存一份，避免把使用者名稱、分數字串塞進 onclick 屬性裡處理跳脫字元的麻煩
+        window.__lbRowsCache = rows;
+    } catch (err) {
+        loadingEl.classList.add('hidden');
+        listEl.innerHTML = `<p class="empty-note">載入失敗：${err.message}</p>`;
+    }
+};
+
+window.editLeaderboardEntry = function (taskId, uid) {
+    const row = (window.__lbRowsCache || []).find(r => r.uid === uid);
+    if (!row) return;
+    const area = document.getElementById('leaderboard-edit-area');
+    area.innerHTML = `
+        <form class="entity-form" onsubmit="return window.submitLeaderboardEdit(event, '${taskId}', '${uid}')">
+            <h3 style="margin:0 0 8px;font-size:14px;">編輯：${escapeHtml(row.playerName || '（未命名）')}</h3>
+            <div class="field"><label>顯示用分數字串</label><input name="scoreLabel" value="${escapeHtml(row.scoreLabel || '')}"></div>
+            <div class="field"><label>排序用數字分數</label><input name="scoreValue" type="number" value="${row.scoreValue ?? 0}" required></div>
+            <div style="display:flex;gap:8px;">
+                <button class="btn-save" type="submit">儲存變更</button>
+                <button type="button" class="btn-cancel" onclick="document.getElementById('leaderboard-edit-area').innerHTML=''">取消</button>
+            </div>
+        </form>`;
+};
+
+window.submitLeaderboardEdit = async function (e, taskId, uid) {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+        await updateDoc(doc(db, 'leaderboard', taskId, 'entries', uid), {
+            scoreLabel: f.get('scoreLabel'),
+            scoreValue: Number(f.get('scoreValue')),
+            updatedAt: Date.now()
+        });
+        showMsg('leaderboard', '已儲存');
+        document.getElementById('leaderboard-edit-area').innerHTML = '';
+        window.loadLeaderboardList();
+    } catch (err) { showMsg('leaderboard', err.message, true); }
+    return false;
+};
+
+// 不把玩家名稱直接塞進 onclick 屬性字串（那樣做，名稱裡如果有引號會被拿來跳脫、注入額外的 JS），
+// 改成只傳 taskId/uid 這種安全的固定格式字串，實際顯示用的名稱從 __lbRowsCache 這份記憶體資料查。
+window.deleteLeaderboardEntry = async function (taskId, uid) {
+    const row = (window.__lbRowsCache || []).find(r => r.uid === uid);
+    const playerName = row?.playerName || '未命名';
+    if (!confirm(`確定要刪除「${playerName}」這筆排行榜紀錄嗎？`)) return;
+    try {
+        await deleteDoc(doc(db, 'leaderboard', taskId, 'entries', uid));
+        showMsg('leaderboard', '已刪除');
+        window.loadLeaderboardList();
+    } catch (err) { showMsg('leaderboard', err.message, true); }
+};
+
+// 清空不受「前20名」限制，抓這個任務底下全部的紀錄逐筆刪除，不留殘餘資料
+window.clearLeaderboard = async function () {
+    const select = document.getElementById('leaderboard-task-select');
+    const taskId = select.value;
+    if (!taskId) return;
+    const taskLabel = select.options[select.selectedIndex]?.text || taskId;
+    if (!confirm(`確定要清空「${taskLabel}」的整個排行榜嗎？此動作無法復原，會刪除全部紀錄（不只前20名）。`)) return;
+    try {
+        showMsg('leaderboard', '清空中…');
+        const snap = await getDocs(collection(db, 'leaderboard', taskId, 'entries'));
+        await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+        showMsg('leaderboard', `已清空，共刪除 ${snap.size} 筆`);
+        window.loadLeaderboardList();
+    } catch (err) { showMsg('leaderboard', err.message, true); }
+};
+
+/* =====================================================
+   系統記錄（taskEventLogs）：任務頁面 complete/score 訊息處理過程的記錄，
+   取代「要即時盯著 console 看」的做法，事後隨時可以回來查。
+===================================================== */
+window.loadTaskLogs = async function () {
+    const listEl = document.getElementById('logs-list');
+    const loadingEl = document.getElementById('logs-list-loading');
+    const showInfo = document.getElementById('logs-show-info').checked;
+    loadingEl.classList.remove('hidden');
+    listEl.innerHTML = '';
+    try {
+        const snap = await getDocs(query(
+            collection(db, 'taskEventLogs'),
+            orderBy('at', 'desc'),
+            limit(50)
+        ));
+        loadingEl.classList.add('hidden');
+        let rows = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        if (!showInfo) rows = rows.filter(r => r.level !== 'info');
+        if (!rows.length) { listEl.innerHTML = `<p class="empty-note">沒有符合條件的記錄</p>`; return; }
+
+        listEl.innerHTML = rows.map(r => {
+            const levelColor = r.level === 'error' ? '#A63D40' : (r.level === 'warn' ? '#B8860B' : '#6B6255');
+            return `
+            <div class="item-row" style="align-items:flex-start;">
+                <div class="item-info">
+                    <div class="item-title" style="color:${levelColor};">[${r.level}] ${r.message}</div>
+                    <div class="item-meta">${new Date(r.at).toLocaleString()} · taskId: ${r.taskId || '-'} · uid: ${r.uid || '-'}</div>
+                    ${r.extra ? `<div class="item-meta" style="word-break:break-all;">${r.extra}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        loadingEl.classList.add('hidden');
+        listEl.innerHTML = `<p class="empty-note">載入失敗：${err.message}</p>`;
+    }
+};
+
+// 清除全部系統記錄：taskEventLogs 只是純診斷用途、唯讀稽核記錄，不是玩家資料的一部分，
+// 清掉不影響任何玩家的金幣/徽章/分數。Firestore 用戶端沒有「整個集合一次刪光」的
+// API，只能分批查詢、逐批刪除，直到查不到剩餘文件為止；每批用 300 筆（低於 Firestore
+// 單批寫入上限 500，留一點餘裕）。這是不可逆的操作，動手前一定要先跳確認視窗。
+window.clearTaskLogs = async function () {
+    const total = await (async () => {
+        // 先問一次「大概有多少筆」讓管理者有個底，避免誤觸清掉大量記錄卻不知情——
+        // 這裡查詢筆數上限抓 2000，只是給管理者一個「大概規模」的參考值，不是精確計數，
+        // 真正清除時是不管這個數字、查到什麼刪什麼，一直刪到空為止。
+        try {
+            const snap = await getDocs(query(collection(db, 'taskEventLogs'), limit(2000)));
+            return snap.size;
+        } catch { return null; }
+    })();
+    const hint = total === null ? '' : (total >= 2000 ? '（至少 2000 筆以上）' : `（約 ${total} 筆）`);
+    if (!confirm(`確定要清除全部系統記錄${hint}嗎？這是不可逆的操作，清掉之後無法復原，但不會影響任何玩家的金幣/徽章/分數資料。`)) return;
+
+    const msgEl = document.getElementById('logs-msg');
+    const listEl2 = document.getElementById('logs-list');
+    let deletedCount = 0;
+    try {
+        while (true) {
+            const snap = await getDocs(query(collection(db, 'taskEventLogs'), limit(300)));
+            if (snap.empty) break;
+            await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
+            deletedCount += snap.size;
+            msgEl.innerHTML = `<p class="empty-note">清除中…已刪除 ${deletedCount} 筆</p>`;
+        }
+        msgEl.innerHTML = `<p class="empty-note">已清除完成，共刪除 ${deletedCount} 筆記錄</p>`;
+        listEl2.innerHTML = `<p class="empty-note">目前沒有記錄</p>`;
+    } catch (err) {
+        msgEl.innerHTML = `<p class="empty-note">清除過程發生錯誤（已刪除 ${deletedCount} 筆）：${err.message}</p>`;
+    }
+};
+
+onAuthStateChanged(auth, async (user) => {
+    document.getElementById('users-login-screen').classList.add('hidden');
+    document.getElementById('users-not-admin').classList.add('hidden');
+    document.getElementById('users-panel-content').classList.add('hidden');
+    document.getElementById('leaderboard-login-screen').classList.add('hidden');
+    document.getElementById('leaderboard-not-admin').classList.add('hidden');
+    document.getElementById('leaderboard-panel-content').classList.add('hidden');
+    document.getElementById('logs-login-screen').classList.add('hidden');
+    document.getElementById('logs-not-admin').classList.add('hidden');
+    document.getElementById('logs-panel-content').classList.add('hidden');
+
+    if (!user) {
+        document.getElementById('users-login-screen').classList.remove('hidden');
+        document.getElementById('leaderboard-login-screen').classList.remove('hidden');
+        document.getElementById('logs-login-screen').classList.remove('hidden');
+        return;
+    }
+
+    const adminSnap = await getDoc(doc(db, 'admins', user.uid));
+    if (!adminSnap.exists()) {
+        document.getElementById('users-not-admin').classList.remove('hidden');
+        document.getElementById('leaderboard-not-admin').classList.remove('hidden');
+        document.getElementById('logs-not-admin').classList.remove('hidden');
+        return;
+    }
+
+    document.getElementById('users-panel-content').classList.remove('hidden');
+    document.getElementById('leaderboard-panel-content').classList.remove('hidden');
+    document.getElementById('logs-panel-content').classList.remove('hidden');
+    window.loadUsersList();
+    renderLeaderboardTaskOptions();
+    window.loadTaskLogs();
+});
+
+/* =====================================================
+   初始化：先看有沒有 GitHub 連線設定
+===================================================== */
+(function init() {
+    const cfg = getGhConfig();
+    if (cfg) {
+        showGhApp();
+    } else {
+        document.getElementById('gh-setup-screen').classList.remove('hidden');
+    }
+})();

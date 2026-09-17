@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理後台 — 在地文化知識型互動平台</title>
+<style>
+    * { box-sizing: border-box; font-family: -apple-system, "Noto Sans TC", sans-serif; }
+    body { margin: 0; background: #F4F5F6; color: #24211D; }
+    header { background: #24211D; color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }
+    header h1 { font-size: 15px; margin: 0; font-weight: 700; }
+    button { cursor: pointer; font-family: inherit; }
+    main { padding: 20px; max-width: 1000px; margin: 0 auto; }
+
+    nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; background: #fff; padding: 6px; border-radius: 10px; border: 1px solid #e5e2d8; }
+    nav.tabs button { padding: 9px 16px; border: none; background: none; border-radius: 7px; font-size: 13px; font-weight: 700; color: #6B6255; }
+    nav.tabs button.active { background: #A63D40; color: #fff; }
+
+    section.panel { display: none; }
+    section.panel.active { display: block; }
+    .panel-layout { display: grid; grid-template-columns: 1fr 340px; gap: 20px; align-items: start; }
+    @media (max-width: 800px) { .panel-layout { grid-template-columns: 1fr; } }
+
+    .card { background: #fff; border: 1px solid #e5e2d8; border-radius: 12px; padding: 18px; }
+    .card h2 { font-size: 15px; margin: 0 0 14px; }
+
+    .item-row { display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 8px; border: 1px solid #eee; margin-bottom: 8px; }
+    .item-row.inactive { opacity: 0.5; }
+    .item-thumb { width: 44px; height: 44px; border-radius: 8px; background: #F2EEE3; flex-shrink: 0; object-fit: cover; }
+    .item-info { flex: 1; min-width: 0; }
+    .item-title { font-size: 13px; font-weight: 700; }
+    .item-meta { font-size: 11px; color: #8B8577; margin-top: 2px; }
+    .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .icon-btn { border: 1px solid #ddd; background: #fff; border-radius: 6px; padding: 5px 10px; font-size: 12px; }
+    .icon-btn.edit { color: #2F6F62; border-color: #2F6F62; }
+    .icon-btn.danger { color: #A63D40; border-color: #A63D40; }
+    .icon-btn.toggle { color: #B8863B; border-color: #B8863B; }
+    .empty-note { font-size: 12px; color: #999; padding: 20px 0; text-align: center; }
+
+    form.entity-form { display: flex; flex-direction: column; gap: 12px; }
+    .field label { font-size: 11px; font-weight: 700; color: #6B6255; display: block; margin-bottom: 4px; }
+    .field input, .field textarea, .field select { width: 100%; padding: 9px 10px; border: 1px solid #ccc; border-radius: 7px; font-size: 13px; font-family: inherit; }
+    .checkbox-field label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: #3A342B; margin-bottom: 0; }
+    .checkbox-field input[type="checkbox"] { width: auto; }
+    .field textarea { resize: vertical; min-height: 50px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    .image-upload-box { border: 2px dashed #D8CBAA; border-radius: 10px; padding: 12px; text-align: center; cursor: pointer; position: relative; background: #FBF8F0; }
+    .image-upload-box img { max-width: 100%; max-height: 100px; border-radius: 8px; display: none; }
+    .image-upload-box .placeholder { font-size: 12px; color: #999; }
+    .image-upload-box input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .upload-progress { font-size: 11px; color: #B8863B; margin-top: 6px; }
+
+    .form-actions { display: flex; gap: 8px; }
+    .btn-save { flex: 1; padding: 11px; background: #A63D40; color: #fff; border: none; border-radius: 8px; font-weight: 700; font-size: 13px; }
+    .btn-cancel { padding: 11px 16px; background: #fff; color: #6B6255; border: 1px solid #ccc; border-radius: 8px; font-size: 13px; }
+    .form-mode-badge { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 20px; display: inline-block; margin-bottom: 10px; }
+    .form-mode-badge.new { background: #E4F5EC; color: #1E6B45; }
+    .form-mode-badge.edit { background: #FBF1DD; color: #8A5A16; }
+
+    /* ── 徽章/證書挑選器（chip + 搜尋新增）：取代原本要手動輸入逗號分隔ID的文字框 ── */
+    .chip-picker { display: flex; flex-direction: column; gap: 8px; }
+    .chip-list { display: flex; flex-wrap: wrap; gap: 6px; min-height: 28px; }
+    .chip-list:empty::after { content: '目前沒有任何項目'; font-size: 12px; color: #999; }
+    .chip { display: flex; align-items: center; gap: 6px; background: #FBF8F0; border: 1px solid #E5DFD3;
+        border-radius: 999px; padding: 4px 6px 4px 10px; font-size: 12px; }
+    .chip img { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; }
+    .chip .chip-remove { border: none; background: #EFE6D4; color: #8A5A16; border-radius: 50%;
+        width: 18px; height: 18px; font-size: 11px; line-height: 1; cursor: pointer; padding: 0; }
+    .chip-search-wrap { position: relative; }
+    .chip-search-results { position: absolute; z-index: 20; top: 100%; left: 0; right: 0; margin-top: 4px;
+        background: #fff; border: 1px solid #ddd; border-radius: 8px; max-height: 220px; overflow-y: auto;
+        box-shadow: 0 6px 16px rgba(0,0,0,0.12); }
+    .chip-search-results .result-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+        cursor: pointer; font-size: 12px; }
+    .chip-search-results .result-row:hover { background: #FBF8F0; }
+    .chip-search-results img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .chip-search-results .result-meta { color: #999; font-size: 11px; margin-left: auto; flex-shrink: 0; }
+    .chip-search-empty { padding: 10px; font-size: 12px; color: #999; text-align: center; }
+
+    .msg { font-size: 12px; padding: 8px 10px; border-radius: 6px; margin-bottom: 12px; }
+    .msg.ok { background: #E4F5EC; color: #1E6B45; }
+    .msg.err { background: #FBE7E5; color: #A63D40; }
+    .hidden { display: none !important; }
+
+    .gh-status-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
+    .gh-status-bar.connected { background: #E4F5EC; color: #1E6B45; }
+    .gh-status-bar button { margin-left: auto; padding: 5px 12px; border-radius: 6px; border: 1px solid currentColor; background: none; font-size: 11px; color: inherit; }
+    .gh-setup-card { max-width: 480px; margin: 60px auto; }
+    .gh-setup-card p { font-size: 12px; color: #6B6255; line-height: 1.6; margin-bottom: 14px; }
+    .gh-setup-card a { color: #A63D40; }
+
+    #login-screen { display: none; align-items: center; justify-content: center; height: 60vh; flex-direction: column; gap: 16px; }
+    .google-btn { padding: 10px 20px; border-radius: 8px; border: 1px solid #ccc; background: #fff; font-size: 14px; }
+    .not-admin { text-align: center; padding: 40px 20px; color: #A63D40; }
+    #gh-token.masked { -webkit-text-security: disc; text-security: disc; }
+</style>
+</head>
+<body>
+
+<header>
+    <h1>在地文化知識型互動平台 — 管理後台</h1>
+    <span id="gh-repo-label" style="font-size:11px;opacity:0.7;"></span>
+</header>
+
+<main>
+    <div id="gh-setup-screen" class="card gh-setup-card hidden">
+        <h2>設定 GitHub 連線</h2>
+        <p>
+            內容資料（Banner／任務／公告／徽章／證書）存在 GitHub repo 裡，
+            後台需要一組有寫入權限的 Personal Access Token 才能編輯。
+            <br><br>
+            到 <a href="https://github.com/settings/tokens?type=beta" target="_blank">GitHub 開發者設定</a>
+            建立一組 <strong>Fine-grained token</strong>，Repository access 選「Only select repositories」
+            指定這個 repo，Permissions 裡把 <strong>Contents</strong> 設為 <strong>Read and write</strong>，
+            建立後複製貼到下面（只會顯示一次，請先複製好）。
+        </p>
+        <div class="field"><label>GitHub 帳號／組織名稱</label><input id="gh-owner" placeholder="例如 ericvu-cd"></div>
+        <div class="field"><label>Repository 名稱</label><input id="gh-repo" placeholder="例如 gamehub-test"></div>
+        <div class="field"><label>分支名稱</label><input id="gh-branch" value="main"></div>
+        <div class="field">
+            <label>Personal Access Token</label>
+            <div style="position:relative;">
+                <input id="gh-token" type="text" autocomplete="off" autocorrect="off" autocapitalize="off"
+                    spellcheck="false" data-lpignore="true" data-1p-ignore
+                    placeholder="github_pat_..." style="padding-right:60px;" class="masked">
+                <button type="button" onclick="window.toggleGhTokenVisibility(event)"
+                    style="position:absolute;right:6px;top:50%;transform:translateY(-50%);border:none;background:none;font-size:11px;font-weight:700;color:#6B6255;cursor:pointer;padding:6px 8px;">隱藏</button>
+            </div>
+            <p style="font-size:11px;color:#8B8577;margin-top:4px;">
+                這裡刻意不用瀏覽器的密碼欄位型態，避免瀏覽器把它當一般密碼儲存，
+                自動帶到別的網頁的密碼欄位去（例如玩家登入畫面）。
+            </p>
+        </div>
+        <p id="gh-setup-error" class="msg err hidden"></p>
+        <button class="btn-save" onclick="window.saveGhSetup()">連線並儲存（存在這台瀏覽器裡）</button>
+    </div>
+
+    <div id="gh-app" class="hidden">
+        <div id="gh-status-bar" class="gh-status-bar connected">
+            已連線：<strong id="gh-status-text"></strong>
+            <button onclick="window.disconnectGh()">中斷連線／換設定</button>
+        </div>
+
+        <nav class="tabs">
+            <button data-tab="banners" class="active" onclick="switchAdminTab('banners')">Banner</button>
+            <button data-tab="tasks" onclick="switchAdminTab('tasks')">任務</button>
+            <button data-tab="shopItems" onclick="switchAdminTab('shopItems')">商店</button>
+            <button data-tab="news" onclick="switchAdminTab('news')">公告</button>
+            <button data-tab="badges" onclick="switchAdminTab('badges')">徽章</button>
+            <button data-tab="certificates" onclick="switchAdminTab('certificates')">證書</button>
+            <button data-tab="users" onclick="switchAdminTab('users')">使用者資料</button>
+            <button data-tab="leaderboard" onclick="switchAdminTab('leaderboard')">排行榜</button>
+            <button data-tab="logs" onclick="switchAdminTab('logs')">系統記錄</button>
+            <button data-tab="settings" onclick="switchAdminTab('settings')">平台設定</button>
+        </nav>
+
+        <section id="panel-banners" class="panel active">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>Banner 清單</h2>
+                    <div id="banners-msg"></div>
+                    <div id="banners-list"></div>
+                </div>
+                <div class="card">
+                    <span id="banners-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="banners-form" onsubmit="return submitBanner(event)">
+                        <div class="field">
+                            <label>圖片</label>
+                            <label class="image-upload-box">
+                                <img id="banners-image-preview">
+                                <span class="placeholder" id="banners-image-placeholder">點擊上傳圖片（選填）</span>
+                                <input type="file" accept="image/*" onchange="handleImageSelect(event,'banners')">
+                            </label>
+                            <div id="banners-upload-progress" class="upload-progress"></div>
+                        </div>
+                        <div class="field"><label>標題</label><input id="banners-title" required></div>
+                        <div class="field"><label>副標題</label><input id="banners-subtitle"></div>
+                        <div class="two-col">
+                            <div class="field"><label>排序（數字越小越前）</label><input id="banners-sortOrder" type="number" value="0"></div>
+                            <div class="field"><label>&nbsp;</label></div>
+                        </div>
+                        <div class="two-col">
+                            <div class="field"><label>上架日期（選填）</label><input id="banners-startAt" type="date"></div>
+                            <div class="field"><label>下架日期（選填）</label><input id="banners-endAt" type="date"></div>
+                        </div>
+                        <div class="field">
+                            <label>點擊後執行（選填）</label>
+                            <select id="banners-actionType" onchange="onBannerActionTypeChange()">
+                                <option value="NONE">不設定</option>
+                                <option value="URL">開啟外部網址</option>
+                                <option value="TASK">開啟指定任務</option>
+                            </select>
+                        </div>
+                        <div class="field" id="banners-actionValue-url-wrap"><label>網址</label><input id="banners-actionValue-url" placeholder="https://..."></div>
+                        <div class="field hidden" id="banners-actionValue-task-wrap"><label>任務 ID</label><input id="banners-actionValue-task" placeholder="例如 g1"></div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="banners-save-btn">新增 Banner</button>
+                            <button type="button" class="btn-cancel hidden" id="banners-cancel-btn" onclick="cancelEdit('banners')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-tasks" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>任務清單</h2>
+                    <div id="tasks-msg"></div>
+                    <div id="tasks-list"></div>
+                </div>
+                <div class="card">
+                    <span id="tasks-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="tasks-form" onsubmit="return submitTask(event)">
+                        <div class="field">
+                            <label>橫幅圖（前台任務列表用，寬度會撐滿卡片、不裁切，高度依圖片比例自動調整）</label>
+                            <label class="image-upload-box">
+                                <img id="tasks-image-preview">
+                                <span class="placeholder" id="tasks-image-placeholder">點擊上傳橫幅圖（選填，沒上傳會顯示預設圖示）</span>
+                                <input type="file" accept="image/*" onchange="handleImageSelect(event,'tasks')">
+                            </label>
+                            <div id="tasks-upload-progress" class="upload-progress"></div>
+                        </div>
+                        <div class="field"><label>任務 ID（英數，建立後不可更改）</label><input id="tasks-id" required></div>
+                        <div class="field"><label>標題</label><input id="tasks-title" required></div>
+                        <div class="field"><label>簡介</label><textarea id="tasks-description"></textarea></div>
+                        <div class="two-col">
+                            <div class="field"><label>色系</label>
+                                <select id="tasks-colorTheme">
+                                    <option value="mint">薄荷綠</option><option value="peach">珊瑚橘</option>
+                                    <option value="gold">金黃</option><option value="sky">天空藍</option><option value="lilac">紫丁香</option>
+                                </select>
+                            </div>
+                            <div class="field"><label>排序</label><input id="tasks-sortOrder" type="number" value="0"></div>
+                        </div>
+                        <div class="field"><label>任務網址（獨立HTML）</label><input id="tasks-link" required></div>
+                        <div class="field"><label>進入扣款金額</label><input id="tasks-entryCost" type="number" value="0"></div>
+                        <div class="field checkbox-field">
+                            <label><input id="tasks-hasLeaderboard" type="checkbox" checked> 這個任務有排行榜</label>
+                        </div>
+                        <p style="font-size:11px;color:#8B8577;margin:4px 0 0;">以下解鎖條件皆選填：</p>
+                        <div class="two-col">
+                            <div class="field"><label>需等級</label><input id="tasks-unlockLevel" type="number"></div>
+                            <div class="field"><label>需通行金幣</label><input id="tasks-unlockCoin" type="number"></div>
+                        </div>
+                        <div class="field"><label>需徽章ID（逗號分隔）</label><input id="tasks-unlockBadges"></div>
+                        <div class="field"><label>需證書ID（逗號分隔）</label><input id="tasks-unlockCerts"></div>
+                        <div class="two-col">
+                            <div class="field"><label>開放起始日</label><input id="tasks-unlockStart" type="date"></div>
+                            <div class="field"><label>開放結束日</label><input id="tasks-unlockEnd" type="date"></div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="tasks-save-btn">新增任務</button>
+                            <button type="button" class="btn-cancel hidden" id="tasks-cancel-btn" onclick="cancelEdit('tasks')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-shopItems" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>商店品項</h2>
+                    <p style="font-size:11px;color:#8B8577;margin-top:-6px;">用金幣兌換的低價值推廣券（例如消費滿百折抵10元、消費送飲料）。核銷是玩家把兌換成功畫面截圖給店家看，系統不做掃碼核銷。</p>
+                    <div id="shopItems-msg"></div>
+                    <div id="shopItems-list"></div>
+                </div>
+                <div class="card">
+                    <span id="shopItems-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="shopItems-form" onsubmit="return submitShopItem(event)">
+                        <div class="field">
+                            <label>圖示</label>
+                            <label class="image-upload-box">
+                                <img id="shopItems-image-preview">
+                                <span class="placeholder" id="shopItems-image-placeholder">點擊上傳圖示（選填）</span>
+                                <input type="file" accept="image/*" onchange="handleImageSelect(event,'shopItems')">
+                            </label>
+                            <div id="shopItems-upload-progress" class="upload-progress"></div>
+                        </div>
+                        <div class="field"><label>品項 ID（英數，建立後不可更改）</label><input id="shopItems-id" required></div>
+                        <div class="field"><label>名稱</label><input id="shopItems-name" required></div>
+                        <div class="field"><label>說明</label><textarea id="shopItems-description"></textarea></div>
+                        <div class="two-col">
+                            <div class="field"><label>兌換金幣數</label><input id="shopItems-cost" type="number" min="1" required></div>
+                            <div class="field"><label>排序</label><input id="shopItems-sortOrder" type="number" value="0"></div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="shopItems-save-btn">新增品項</button>
+                            <button type="button" class="btn-cancel hidden" id="shopItems-cancel-btn" onclick="cancelEdit('shopItems')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-news" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>公告清單</h2>
+                    <div id="news-msg"></div>
+                    <div id="news-list"></div>
+                </div>
+                <div class="card">
+                    <span id="news-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="news-form" onsubmit="return submitNews(event)">
+                        <div class="field"><label>標題</label><input id="news-title" required></div>
+                        <div class="field"><label>內容</label><textarea id="news-content"></textarea></div>
+                        <div class="two-col">
+                            <div class="field"><label>上架日期（選填）</label><input id="news-startAt" type="date"></div>
+                            <div class="field"><label>下架日期（選填）</label><input id="news-endAt" type="date"></div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="news-save-btn">新增公告</button>
+                            <button type="button" class="btn-cancel hidden" id="news-cancel-btn" onclick="cancelEdit('news')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-badges" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>徽章字典</h2>
+                    <div id="badges-msg"></div>
+                    <div id="badges-list"></div>
+                </div>
+                <div class="card">
+                    <span id="badges-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="badges-form" onsubmit="return submitBadge(event)">
+                        <div class="field">
+                            <label>圖示</label>
+                            <label class="image-upload-box">
+                                <img id="badges-image-preview">
+                                <span class="placeholder" id="badges-image-placeholder">點擊上傳圖示（選填）</span>
+                                <input type="file" accept="image/*" onchange="handleImageSelect(event,'badges')">
+                            </label>
+                            <div id="badges-upload-progress" class="upload-progress"></div>
+                        </div>
+                        <div class="field"><label>徽章 ID（建立後不可更改）</label><input id="badges-id" required></div>
+                        <div class="field"><label>名稱</label><input id="badges-name" required></div>
+                        <div class="field"><label>說明</label><textarea id="badges-description"></textarea></div>
+                        <div class="field"><label>來源任務 ID（僅供顯示，不再驗證）</label><input id="badges-sourceTaskId"></div>
+                        <div class="field"><label>等級權重（算等級用，1個徽章預設算1分，沒特別調整就留 1）</label><input id="badges-weight" type="number" min="0" step="1" value="1"></div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="badges-save-btn">新增徽章</button>
+                            <button type="button" class="btn-cancel hidden" id="badges-cancel-btn" onclick="cancelEdit('badges')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-certificates" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>證書字典</h2>
+                    <div id="certificates-msg"></div>
+                    <div id="certificates-list"></div>
+                </div>
+                <div class="card">
+                    <span id="certificates-form-badge" class="form-mode-badge new">新增模式</span>
+                    <form class="entity-form" id="certificates-form" onsubmit="return submitCertificate(event)">
+                        <div class="field">
+                            <label>圖示</label>
+                            <label class="image-upload-box">
+                                <img id="certificates-image-preview">
+                                <span class="placeholder" id="certificates-image-placeholder">點擊上傳圖示（選填）</span>
+                                <input type="file" accept="image/*" onchange="handleImageSelect(event,'certificates')">
+                            </label>
+                            <div id="certificates-upload-progress" class="upload-progress"></div>
+                        </div>
+                        <div class="field"><label>證書 ID（建立後不可更改）</label><input id="certificates-id" required></div>
+                        <div class="field"><label>名稱</label><input id="certificates-name" required></div>
+                        <div class="field"><label>說明</label><textarea id="certificates-description"></textarea></div>
+                        <div class="field"><label>來源任務 ID（僅供顯示，不再驗證）</label><input id="certificates-sourceTaskId"></div>
+                        <div class="field"><label>等級權重（算等級用，1張證書預設算1分，沒特別調整就留 1）</label><input id="certificates-weight" type="number" min="0" step="1" value="1"></div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn-save" id="certificates-save-btn">新增證書</button>
+                            <button type="button" class="btn-cancel hidden" id="certificates-cancel-btn" onclick="cancelEdit('certificates')">取消編輯</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-users" class="panel">
+            <div id="users-login-screen" class="card" style="max-width:420px;text-align:center;">
+                <p style="font-size:13px;margin-bottom:14px;">編修使用者資料需要另外用 Google 帳號登入驗證身分</p>
+                <button class="google-btn" onclick="handleGoogleLogin()">使用 Google 帳號登入</button>
+                <p id="users-login-error" style="color:#A63D40;font-size:12px;"></p>
+            </div>
+            <div id="users-not-admin" class="not-admin hidden">
+                <p>此 Google 帳號不在管理者名單內。</p>
+                <button class="google-btn" onclick="handleGoogleLogout()">登出</button>
+            </div>
+            <div id="users-panel-content" class="hidden">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+                    <button class="icon-btn" onclick="handleGoogleLogout()">登出</button>
+                </div>
+                <div class="panel-layout">
+                    <div class="card">
+                        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                            <h2 style="margin:0;">使用者清單</h2>
+                            <button class="icon-btn" onclick="window.loadUsersList()">重新整理</button>
+                        </div>
+                        <p style="font-size:11px;color:#8B8577;margin-top:-6px;">點名稱可直接載入編輯，或用右側搜尋框輸入完整使用者名稱查詢。</p>
+                        <div id="users-list-loading" class="empty-note hidden">載入中...</div>
+                        <div id="users-list"></div>
+                    </div>
+                    <div class="card">
+                        <h2>使用者資料編修</h2>
+                        <p style="font-size:12px;color:#8B8577;margin-top:-6px;">用於人工修正異常資料。金幣調整會記錄一筆 admin_adjust 收支明細。</p>
+                        <div id="users-msg"></div>
+                        <form class="entity-form" onsubmit="return searchUser(event)">
+                            <div class="field"><label>使用者名稱（完整、大小寫不拘）</label><input id="user-search-input" required></div>
+                            <button class="btn-save" type="submit">查詢</button>
+                        </form>
+                        <div id="user-edit-area" style="margin-top:16px;"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-leaderboard" class="panel">
+            <div id="leaderboard-login-screen" class="card" style="max-width:420px;text-align:center;">
+                <p style="font-size:13px;margin-bottom:14px;">編修排行榜需要另外用 Google 帳號登入驗證身分</p>
+                <button class="google-btn" onclick="handleGoogleLogin()">使用 Google 帳號登入</button>
+                <p id="leaderboard-login-error" style="color:#A63D40;font-size:12px;"></p>
+            </div>
+            <div id="leaderboard-not-admin" class="not-admin hidden">
+                <p>此 Google 帳號不在管理者名單內。</p>
+                <button class="google-btn" onclick="handleGoogleLogout()">登出</button>
+            </div>
+            <div id="leaderboard-panel-content" class="hidden">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+                    <button class="icon-btn" onclick="handleGoogleLogout()">登出</button>
+                </div>
+                <div class="card">
+                    <h2>排行榜管理</h2>
+                    <p style="font-size:12px;color:#8B8577;margin-top:-6px;">選擇任務後顯示前 20 名，可修改分數、刪除單筆紀錄；「清空」不受前20名限制，會刪除該任務全部紀錄。</p>
+                    <div id="leaderboard-msg"></div>
+                    <div class="field"><label>選擇任務</label>
+                        <select id="leaderboard-task-select" onchange="window.loadLeaderboardList()"></select>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0;">
+                        <button class="icon-btn" onclick="window.loadLeaderboardList()">重新整理</button>
+                        <button class="icon-btn danger" onclick="window.clearLeaderboard()">清空這個任務的排行榜</button>
+                    </div>
+                    <div id="leaderboard-list-loading" class="empty-note hidden">載入中...</div>
+                    <div id="leaderboard-list"></div>
+                    <div id="leaderboard-edit-area" style="margin-top:16px;"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-logs" class="panel">
+            <div id="logs-login-screen" class="card" style="max-width:420px;text-align:center;">
+                <p style="font-size:13px;margin-bottom:14px;">查看系統記錄需要另外用 Google 帳號登入驗證身分</p>
+                <button class="google-btn" onclick="handleGoogleLogin()">使用 Google 帳號登入</button>
+            </div>
+            <div id="logs-not-admin" class="not-admin hidden">
+                <p>此 Google 帳號不在管理者名單內。</p>
+                <button class="google-btn" onclick="handleGoogleLogout()">登出</button>
+            </div>
+            <div id="logs-panel-content" class="hidden">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+                    <button class="icon-btn" onclick="handleGoogleLogout()">登出</button>
+                </div>
+                <div class="card">
+                    <h2>系統記錄</h2>
+                    <p style="font-size:12px;color:#8B8577;margin-top:-6px;">任務頁面 complete／score 訊息處理過程的記錄，最新 50 筆。預設只顯示警告／錯誤，勾選下面可以看全部（含正常成功的記錄）。</p>
+                    <div id="logs-msg"></div>
+                    <div class="field checkbox-field">
+                        <label><input type="checkbox" id="logs-show-info" onchange="window.loadTaskLogs()"> 顯示一般記錄（info）</label>
+                    </div>
+                    <button class="icon-btn" onclick="window.loadTaskLogs()">重新整理</button>
+                    <button class="icon-btn" style="color:#b23b3b;" onclick="window.clearTaskLogs()">清除全部記錄</button>
+                    <div id="logs-list-loading" class="empty-note hidden">載入中...</div>
+                    <div id="logs-list" style="margin-top:10px;"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="panel-settings" class="panel">
+            <div class="panel-layout">
+                <div class="card">
+                    <h2>平台設定</h2>
+                    <p style="font-size:12px;color:#8B8577;margin-top:-6px;">每日登入贈送金幣數、升等所需加權物件數，這兩個原本寫死在程式碼裡的數字，現在改成存在這裡，改了不用重新部署程式碼。</p>
+                    <div id="settings-msg"></div>
+                    <div id="settings-form-area">載入中...</div>
+                </div>
+            </div>
+        </section>
+    </div>
+</main>
+
+<script type="module" src="admin.js"></script>
+</body>
+</html>
