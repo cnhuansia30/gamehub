@@ -10,13 +10,12 @@ import { getAuth } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-aut
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
   const firebaseConfig = {
-    apiKey: "AIzaSyCkVoePkK_0_yJsDcA_slQVlvZ9KjwxIgU",
-    authDomain: "gamehub-test-cf42d.firebaseapp.com",
-    projectId: "gamehub-test-cf42d",
-    storageBucket: "gamehub-test-cf42d.firebasestorage.app",
-    messagingSenderId: "544673054706",
-    appId: "1:544673054706:web:2500b09a6b4298d981f56b",
-    measurementId: "G-402NNKFPZ8"
+    apiKey: "AIzaSyDu2LT6aKGR5fk8QKfDUhBVh80raivqgGM",
+    authDomain: "gamehub-deb3c.firebaseapp.com",
+    projectId: "gamehub-deb3c",
+    storageBucket: "gamehub-deb3c.firebasestorage.app",
+    messagingSenderId: "914890090069",
+    appId: "1:914890090069:web:dce8660915c54ce5cf16dc"
   };
 
 // 使用者以「自訂名稱＋密碼」註冊登入時，Firebase Authentication 內部需要一組
