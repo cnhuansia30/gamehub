@@ -138,16 +138,23 @@ service cloud.firestore {
           && g.txCount <= MAX_TX_PER_DAY();
       }
 
-      // --- 樣式 2：每日登入獎勵，同一自然日（UTC+8）只能領一次，固定 +10 ---
+      // --- 樣式 2：每日登入獎勵（拉霸），同一自然日（UTC+8）只能領一次 ---
+      // 金額不再固定 +10：改成每日拉霸抽出的數字，允許 1 ~ MAX_SINGLE_TX() 的整數。
+      // 上限實際上由後台 data/settings.json 的 dailyLoginCoins 決定（規則讀不到 GitHub
+      // 上的設定檔，所以這裡只能擋住 1~50 這個外框）；金幣增加量、交易紀錄的金額、
+      // 每日防護的淨變動三者必須是同一個數字，不能各寫各的。
       function isDailyLoginClaim(before, after) {
         let today = utc8DayNumber();
+        let amount = after.lastTransaction.amount;
         return before.get('lastDailyLoginDay', -1) != today
           && after.lastDailyLoginDay == today
-          && after.coins == before.coins + 10
+          && amount is int
+          && amount >= 1
+          && amount <= MAX_SINGLE_TX()
+          && after.coins == before.coins + amount
           && changedKeys(before, after).hasOnly(['lastDailyLoginDay', 'coins', 'dailyGuard', 'lastTransaction'])
           && after.lastTransaction.type == 'daily_login'
-          && after.lastTransaction.amount == 10
-          && isValidDailyGuardUpdate(before, after, 10);
+          && isValidDailyGuardUpdate(before, after, amount);
       }
 
       // --- 樣式 3：進入任務扣款。因任務資料不在 Firestore，無法核對金額
@@ -329,6 +336,18 @@ service cloud.firestore {
       // 不是給玩家自己清除自己的記錄。
       allow update: if false;
       allow delete: if isAdmin();
+    }
+
+    // ===================================================================
+    // 現場競賽即時看板：liveCompetition/{slotId}
+    // 完全獨立於平台正式資料之外的臨時性資料表，只給「魚丸追追樂現場5人競賽」
+    // 這個活動限定工具使用（catch-event.html + catch-event-board.html）。
+    // 不驗證身分（平板不登入平台帳號，只認機器編號 slot1~slot5），公開可讀寫，
+    // 不涉及任何真實玩家帳號/金幣/徽章/排行榜資料，活動結束後這份資料放著
+    // 不管也不影響任何其他功能。
+    // ===================================================================
+    match /liveCompetition/{slotId} {
+      allow read, write: if true;
     }
   }
 }
