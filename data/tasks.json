@@ -126,5 +126,27 @@
     "sortOrder": 5,
     "hasLeaderboard": true,
     "isActive": true
+  },
+  {
+    "id": "0",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1790230385501_fgbnr.jpg",
+    "title": "友魚小學堂",
+    "description": "食魚樂園",
+    "colorTheme": "mint",
+    "link": "https://cnhuansia30.github.io/fishguide/fishguide-desktop.html",
+    "entryCost": 0,
+    "unlockConditions": [
+      {
+        "type": "LEVEL",
+        "value": 0
+      },
+      {
+        "type": "COIN",
+        "value": 0
+      }
+    ],
+    "sortOrder": 0,
+    "hasLeaderboard": false,
+    "isActive": true
   }
 ]
