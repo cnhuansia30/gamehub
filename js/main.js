@@ -12,6 +12,8 @@ import { claimDailyLogin, redeemShopItem } from './coins.js';
 import { openTask, initTaskMessageListener } from './tasks.js';
 import { fetchLeaderboard } from './leaderboard.js';
 import { openDailySlot } from './dailySlot.js';
+import { openCrewCard, closeCrewCard, getCrewTitle } from './crewCard.js';
+import { openInstallGuide, runStartupInstallCheck, updateMenuEntry } from './installGuide.js';
 
 let currentUser = null;
 let siteData = { banners: [], tasks: [], news: [], badges: {}, certificates: {}, avatarPresets: [] };
@@ -63,7 +65,7 @@ function computeLevel(user) {
 function computeUnlockStatus(task, user) {
     const conditions = task.unlockConditions || [];
     if (conditions.length === 0) return { canPlay: true, reason: '自由參加' };
-    if (!user) return { canPlay: false, reason: '請先登記通行證' };
+    if (!user) return { canPlay: false, reason: '請先持船員證報到' };
 
     const today = Date.now();
     const reasons = [];
@@ -167,14 +169,14 @@ function showToast(text) {
 window.toggleAuthMode = function () {
     isRegisterMode = !isRegisterMode;
 
-    document.getElementById('auth-title').innerText = isRegisterMode ? '申請加入探索隊' : '通行證登記';
+    document.getElementById('auth-title').innerText = isRegisterMode ? '申請船員證' : '船員報到';
     document.getElementById('auth-sub').innerText = isRegisterMode
-        ? '第一次來嗎？建立你自己的通行證'
-        : '已有帳號的隊員，請在這裡登入';
-    document.getElementById('auth-submit-text').innerText = isRegisterMode ? '核發通行證' : '登記';
+        ? '第一次來嗎？申請你的船員證'
+        : '已有船員證的船員，請在這裡登入';
+    document.getElementById('auth-submit-text').innerText = isRegisterMode ? '核發船員證' : '報到';
     document.getElementById('auth-toggle-link').innerText = isRegisterMode
-        ? '已經有通行證了？點此登入'
-        : '還沒有通行證？點此申請加入';
+        ? '已經有船員證了？點此報到'
+        : '還沒有船員證？點此申請加入';
 
     // 模式標籤+卡片強調色一起換，兩個畫面外觀不能靠仔細看文字才分得出來
     document.getElementById('auth-mode-badge').innerText = isRegisterMode ? '📝 註冊模式' : '🔑 登入模式';
@@ -280,6 +282,16 @@ window.handleLogout = async function () {
     document.getElementById('auth-modal').classList.remove('hidden');
 };
 
+window.openMyCrewCard = function () {
+    document.getElementById('user-menu').classList.add('hidden');
+    if (!currentUser) {
+        document.getElementById('auth-modal').classList.remove('hidden');
+        return;
+    }
+    const avatar = siteData.avatarPresets.find(a => a.id === currentUser.avatarId);
+    openCrewCard({ user: currentUser, avatar: avatar?.emoji || '🙂', level: computeLevel(currentUser) });
+};
+
 window.toggleUserMenu = function () {
     document.getElementById('user-menu').classList.toggle('hidden');
 };
@@ -313,7 +325,9 @@ function renderUserBar() {
     const avatarEl = document.getElementById('user-avatar');
     const progressWrap = document.getElementById('level-progress-wrap');
     if (!currentUser) {
-        document.getElementById('user-name').innerText = '未登記隊員';
+        document.getElementById('user-name').innerText = '尚未報到的船員';
+        document.getElementById('user-crew-title').textContent = '';
+        document.getElementById('user-crew-title').classList.add('hidden');
         document.getElementById('user-level').innerText = 'Lv.0';
         document.getElementById('user-coins').innerText = '0';
         avatarEl.innerText = '🧭';
@@ -324,6 +338,8 @@ function renderUserBar() {
     const avatar = siteData.avatarPresets.find(a => a.id === currentUser.avatarId);
     const levelInfo = computeLevelInfo(currentUser);
     document.getElementById('user-name').innerText = currentUser.nickname;
+    document.getElementById('user-crew-title').textContent = getCrewTitle(levelInfo.level);
+    document.getElementById('user-crew-title').classList.remove('hidden');
     document.getElementById('user-level').innerText = `Lv.${levelInfo.level}`;
     document.getElementById('user-coins').innerText = currentUser.coins;
     avatarEl.innerText = avatar?.emoji || '🙂';
@@ -692,6 +708,10 @@ function hideLoadingScreen() {
 setTimeout(hideLoadingScreen, 10000);
 
 async function init() {
+    // PWA：程式一開始就立刻檢查有沒有安裝，沒有就馬上顯示安裝畫面（不等內容載入或登入），
+    // 平台在畫面背後照常載入。這裡不 await，下方每日拉霸之前才等它關閉。
+    runStartupInstallCheck();
+
     try {
         await loadAllContent();
     } catch (err) {
@@ -706,15 +726,35 @@ async function init() {
         (updatedUser) => { currentUser = updatedUser; renderUserBar(); renderTasks(); }
     );
 
+    // PWA：使用者選單的「安裝到主畫面」入口（已經是 App 模式時自動隱藏）
+    window.openInstallGuide = () => { document.getElementById('user-menu').classList.add('hidden'); openInstallGuide(); };
+    updateMenuEntry();
+
     watchAuthState(async (user) => {
+        closeCrewCard();
         currentUser = user;
         renderUserBar();
         renderTasks();
         renderNewsBadgeDot();
         document.getElementById('auth-modal').classList.toggle('hidden', !!user);
         hideLoadingScreen(); // 內容跟登入狀態都確認完了，這時候才收起「連線中」畫面
+        // 等安裝畫面關閉才進行每日拉霸，避免兩個視窗疊在一起（安裝畫面在 init 一開始就已顯示，
+        // 這裡拿到的是同一個檢查結果）。安裝完成的人畫面不會關閉，拉霸要到主畫面 App 裡領。
+        await runStartupInstallCheck();
         if (user) await maybeClaimDailyLogin();
     });
 }
 
 init();
+
+// PWA：註冊 Service Worker（放在網站根目錄的 sw.js），負責圖片音樂快取加速。
+// 等頁面載入完才註冊，避免跟首頁需要的資源搶網路。路徑用相對路徑，
+// 正式網址根目錄或測試用 repo 的子路徑都能正確找到。
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(err => console.warn('Service Worker 註冊失敗', err));
+    });
+}
+
+
+
