@@ -186,10 +186,7 @@ function injectTaskOverlayStyles() {
     .task-overlay-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         color: rgba(255,255,255,0.7); font-size: 14px; pointer-events: none; }
     `;
-<<<<<<< HEAD
     style.textContent += ".task-cost-dialog::backdrop { background:rgba(0,0,0,.65); }";
-=======
->>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
     document.head.appendChild(style);
 }
 
@@ -206,11 +203,7 @@ function createTaskOverlay(task) {
             <div class="task-overlay-loading">任務載入中…</div>
             <iframe class="task-overlay-frame" allow="autoplay; fullscreen; screen-wake-lock"></iframe>
         </div>`;
-<<<<<<< HEAD
     el.querySelector('.task-overlay-title').textContent = task.title || task.name || '';
-=======
-    el.querySelector('.task-overlay-title').textContent = task.name || '';
->>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
     const iframe = el.querySelector('.task-overlay-frame');
     iframe.title = task.name || '任務';
     iframe.addEventListener('load', () => {
@@ -218,7 +211,6 @@ function createTaskOverlay(task) {
         if (loading && iframe.getAttribute('src')) loading.remove();
     });
     // 平台自己的返回按鈕：不需要任務配合，任何任務（包含不跟平台溝通的）都能用它離開
-<<<<<<< HEAD
     el.querySelector('.task-overlay-back').addEventListener('click', async event => {
         const button = event.currentTarget;
         if (button.disabled) return;
@@ -228,12 +220,6 @@ function createTaskOverlay(task) {
                 if (activeTaskOverlay?.el === el) closeTaskOverlay(task.id);
             }
         } finally { button.disabled = false; }
-=======
-    el.querySelector('.task-overlay-back').addEventListener('click', () => {
-        if (window.confirm('確定要離開任務、返回平台嗎？\n目前這一局的進度不會被保留。')) {
-            closeTaskOverlay(task.id);
-        }
->>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
     });
     document.body.appendChild(el);
     document.documentElement.classList.add('task-overlay-open');
@@ -254,7 +240,6 @@ export function closeTaskOverlay(taskId) {
     }
 }
 
-<<<<<<< HEAD
 // 預載只下載資源，不建立 iframe、不執行任務程式。
 let taskOpening = false;
 const taskPreloads = new Map();
@@ -340,38 +325,6 @@ export async function openTask(task, currentUser, onCoinsChanged) {
         iframe.src = task.link;
         return { ok: true };
     } finally { taskOpening = false; }
-=======
-// 開啟任務：先蓋上任務視窗（顯示載入中），扣款成功才真正載入任務網址
-export async function openTask(task, currentUser, onCoinsChanged) {
-    if (!currentUser) {
-        alert('請先持船員證報到');
-        return { ok: false };
-    }
-    if (activeTaskOverlay) return { ok: false }; // 已經有任務開著（理論上任務視窗會蓋住大廳，點不到）
-
-    const { el, iframe } = createTaskOverlay(task);
-    activeTaskOverlay = { taskId: task.id, el, iframe };
-
-    // 扣款的同時平行查詢玩家在這個任務的個人最佳成績：扣款本來就要 await，
-    // 順便平行查成績幾乎不增加等待時間，查詢結果有 sessionStorage 快取。
-    const [costResult, myScore] = await Promise.all([
-        deductTaskCost(currentUser.uid, task),
-        fetchMyScore(task.id, currentUser.uid)
-    ]);
-    if (!costResult.ok) {
-        closeTaskOverlay(task.id); // 扣款失敗，收掉還沒載入任務的視窗
-        alert(costResult.reason);
-        return { ok: false };
-    }
-    if (costResult.newCoins !== undefined) onCoinsChanged(costResult.newCoins, costResult.guard);
-
-    // iframe.contentWindow 在同一個 iframe 裡換頁時仍是同一個物件，
-    // 任務頁面載入後送來的訊息，event.source 會等於這裡記下的 win。
-    const origin = new URL(task.link, location.href).origin;
-    openTaskWindows.set(task.id, { win: iframe.contentWindow, origin, myScore });
-    iframe.src = task.link;
-    return { ok: true };
->>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
 }
 
 // 掛上全站唯一的訊息監聽器，在平台初始化時呼叫一次
