@@ -1131,7 +1131,11 @@
             gameState.aiBudgets = calcAIBudgets(totalValue);
 
             if (gameState.round === 1) {
+<<<<<<< HEAD
                 gameState.budget = calcInitialBudget(totalValue) * (richTicketActive ? 2 : 1);
+=======
+                gameState.budget = calcInitialBudget(totalValue);
+>>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
                 gameState.lastTopUp = gameState.budget;
             } else {
                 gameState.lastTopUp = 0;

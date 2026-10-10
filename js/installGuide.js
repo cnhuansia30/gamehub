@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 import { platformAlert } from './platformDialogs.js';
+=======
+>>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
 // 安裝到主畫面引導
 // 安裝成功後：先嘗試關閉瀏覽器頁面；若瀏覽器禁止自動關閉，
 // 就以全頁完成畫面鎖住網頁，引導玩家回主畫面從 App 圖示重新開啟。
@@ -224,7 +227,11 @@ export function runStartupInstallCheck(){
 
 export function openInstallGuide(){
     if(isStandalone()){
+<<<<<<< HEAD
         void platformAlert('目前已經是從主畫面打開的 App 模式了', '安裝到主畫面');
+=======
+        alert('目前已經是從主畫面打開的 App 模式了');
+>>>>>>> be03168e31ca4a4444a2997f71ed278904420fbe
         return;
     }
     showGuide({auto:false});
