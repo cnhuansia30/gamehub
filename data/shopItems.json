@@ -1,1 +1,35 @@
-[]
+[
+  {
+    "id": "fishball_revive",
+    "name": "魚丸追追樂復活券",
+    "description": "魚丸追追樂失敗時，可使用本券重試目前關卡，保留前面已完成關卡的累計分數。復活後的成績照常計入正式紀錄。每種最多持有一張，使用後消耗。",
+    "iconUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/shopItems/1791535304082_fishball_revive.png",
+    "cost": 300,
+    "type": "item_ticket",
+    "taskId": "fishball",
+    "sortOrder": 0,
+    "isActive": true
+  },
+  {
+    "id": "fishmarket_rich",
+    "name": "永續魚市拍賣富翁券",
+    "description": "魚市開局時使用，本局起始資金加倍，跨四回合使用。正式成績與獎勵照常計算。最多持有一張，使用後可再購買。",
+    "iconUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/shopItems/1791534380510_fishmarket_rich.png",
+    "cost": 200,
+    "type": "item_ticket",
+    "taskId": "fishmarket",
+    "sortOrder": 1,
+    "isActive": true
+  },
+  {
+    "id": "stoneweir_assistant",
+    "name": "石滬修復助手券",
+    "description": "石滬開局時使用，本局魚群抵達後自動收進安全魚獲，白天夜晚都有效，避免鳥、小偷及退潮造成魚獲損失。正式成績與獎勵照常計算。最多持有一張，使用後可再購買。",
+    "iconUrl": "https://raw.githubusercontent.com/ericvu-cd/gamehub-test/main/data/images/shopItems/1791534398349_stoneweir_assistant.png",
+    "cost": 200,
+    "type": "item_ticket",
+    "taskId": "stoneweir",
+    "sortOrder": 2,
+    "isActive": true
+  }
+]

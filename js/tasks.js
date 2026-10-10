@@ -1,3 +1,5 @@
+import { platformConfirm, platformAlert } from './platformDialogs.js';
+import { useItemTicket } from './itemTickets.js';
 // =====================================================
 // 任務視窗溝通：開新視窗 + postMessage
 // 對應「任務頁面通訊介面規格.md」
@@ -137,48 +139,192 @@ function logTaskEvent(uid, taskId, level, message, extra) {
         });
 }
 
-// 定期清掉使用者手動關閉分頁（沒送 exit 訊息）的殘留記錄
+// 定期清掉已經不存在的任務視窗記錄（保險用；任務視窗關閉時本來就會一併清掉）
 setInterval(() => {
     for (const [taskId, entry] of openTaskWindows) {
         if (entry.win.closed) openTaskWindows.delete(taskId);
     }
 }, 5000);
 
-// 開啟任務：先扣款（若有），成功才真正開新視窗
+/* =====================================================================
+   任務視窗：任務改成在平台畫面上蓋一層全螢幕視窗、嵌在裡面打開，不再開新分頁。
+   原因：平台做成 PWA（加到主畫面）後，從 App 裡開新分頁在 iPhone 會跳去 Safari、
+   在 Android 會開成有網址列的小瀏覽器視窗，都會露出網址，而且任務跟平台的連線會斷掉，
+   金幣/徽章/分數送不回來。嵌在平台裡打開則一般瀏覽器跟 App 模式都能正常運作，
+   也不再有「新分頁被瀏覽器擋下」的問題。
+   任務端送訊息的方式不用改：任務偵測到自己被嵌在框架裡，本來就會把訊息送給上一層
+   （window.parent），也就是這裡的平台。
+   ===================================================================== */
+let activeTaskOverlay = null;      // { taskId, el, iframe }
+let taskOverlayClosedListener = null;
+
+export function setTaskOverlayClosedListener(fn) { taskOverlayClosedListener = fn; }
+
+function injectTaskOverlayStyles() {
+    if (document.getElementById('task-overlay-style')) return;
+    const style = document.createElement('style');
+    style.id = 'task-overlay-style';
+    style.textContent = `
+    html.task-overlay-open, html.task-overlay-open body { overflow: hidden; }
+    .task-overlay { position: fixed; inset: 0; z-index: 150; background: #000;
+        display: flex; flex-direction: column; }
+    .task-overlay-bar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+        padding: calc(6px + env(safe-area-inset-top)) 10px 6px; background: #0c1230;
+        border-bottom: 1px solid rgba(255,255,255,0.12); }
+    .task-overlay-back { flex: 0 0 auto; border: none; border-radius: 16px; padding: 6px 12px;
+        background: rgba(255,255,255,0.14); color: #fff; font-size: 13px; font-weight: 700;
+        cursor: pointer; font-family: inherit; }
+    .task-overlay-title { flex: 1 1 auto; min-width: 0; color: rgba(255,255,255,0.85); font-size: 13px;
+        font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
+        padding-right: 60px; }
+    .task-overlay-body { position: relative; flex: 1 1 auto; min-height: 0; }
+    /* 平板、寬螢幕：上方列與任務都限制成手機寬度、置中，兩側留黑底。
+       任務頁面都是照手機直式設計的，很多沒有自己的寬度上限，直接撐滿平板會被拉得很寬。
+       480px 跟平台本身的寬度上限一致；手機（寬度不到 480）完全不受影響。 */
+    .task-overlay-bar, .task-overlay-body { box-sizing: border-box; width: 100%; max-width: 480px; margin-left: auto; margin-right: auto; }
+    .task-overlay-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+    .task-overlay-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        color: rgba(255,255,255,0.7); font-size: 14px; pointer-events: none; }
+    `;
+    style.textContent += ".task-cost-dialog::backdrop { background:rgba(0,0,0,.65); }";
+    document.head.appendChild(style);
+}
+
+function createTaskOverlay(task) {
+    injectTaskOverlayStyles();
+    const el = document.createElement('div');
+    el.className = 'task-overlay';
+    el.innerHTML = `
+        <div class="task-overlay-bar">
+            <button type="button" class="task-overlay-back">← 返回平台</button>
+            <div class="task-overlay-title"></div>
+        </div>
+        <div class="task-overlay-body">
+            <div class="task-overlay-loading">任務載入中…</div>
+            <iframe class="task-overlay-frame" allow="autoplay; fullscreen; screen-wake-lock"></iframe>
+        </div>`;
+    el.querySelector('.task-overlay-title').textContent = task.title || task.name || '';
+    const iframe = el.querySelector('.task-overlay-frame');
+    iframe.title = task.name || '任務';
+    iframe.addEventListener('load', () => {
+        const loading = el.querySelector('.task-overlay-loading');
+        if (loading && iframe.getAttribute('src')) loading.remove();
+    });
+    // 平台自己的返回按鈕：不需要任務配合，任何任務（包含不跟平台溝通的）都能用它離開
+    el.querySelector('.task-overlay-back').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+            if (await platformConfirm('確定要離開任務、返回平台嗎？\n目前這一局的進度不會被保留。', '返回平台', '返回平台')) {
+                if (activeTaskOverlay?.el === el) closeTaskOverlay(task.id);
+            }
+        } finally { button.disabled = false; }
+    });
+    document.body.appendChild(el);
+    document.documentElement.classList.add('task-overlay-open');
+    return { el, iframe };
+}
+
+// 關閉任務視窗：任務送 exit 訊息、或玩家按平台的「返回平台」都會走到這裡
+export function closeTaskOverlay(taskId) {
+    if (!activeTaskOverlay) return;
+    if (taskId && activeTaskOverlay.taskId !== taskId) return;
+    const closedId = activeTaskOverlay.taskId;
+    openTaskWindows.delete(closedId);
+    activeTaskOverlay.el.remove();
+    activeTaskOverlay = null;
+    document.documentElement.classList.remove('task-overlay-open');
+    if (taskOverlayClosedListener) {
+        try { taskOverlayClosedListener(closedId); } catch (e) { console.error(e); }
+    }
+}
+
+// 預載只下載資源，不建立 iframe、不執行任務程式。
+let taskOpening = false;
+const taskPreloads = new Map();
+function preloadTaskHome(task) {
+    const url = new URL(task.link, location.href);
+    if (taskPreloads.has(url.href)) return;
+    const hint = document.createElement('link');
+    hint.rel = 'prefetch'; hint.as = 'document'; hint.href = url.href;
+    document.head.appendChild(hint);
+    const work = (async () => {
+        const response = await fetch(url.href, { cache: 'force-cache', signal: AbortSignal.timeout(8000) });
+        if (!response.ok) throw new Error('preload');
+        const html = await response.text();
+        const imageTags = html.match(/<img\b[^>]*>/gi) || [];
+        const priority = imageTags.find(tag => /fetchpriority=["']high["']/i.test(tag));
+        const src = priority?.match(/\bsrc=["']([^"']+)["']/i)?.[1]
+            || html.match(/url\(\s*["']?([^\s)"']+\.(?:png|jpe?g|webp|avif)(?:\?[^\s)"']*)?)["']?\s*\)/i)?.[1]
+            || imageTags.find(tag => /\bsrc=["'][^"']+["']/i.test(tag))?.match(/\bsrc=["']([^"']+)["']/i)?.[1];
+        if (src) {
+            const image = new Image();
+            image.src = new URL(src, response.url || url.href).href;
+        }
+    })().catch(() => { taskPreloads.delete(url.href); });
+    taskPreloads.set(url.href, work);
+}
+function confirmTaskCost(task) {
+    injectTaskOverlayStyles();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'task-cost-dialog';
+    dialog.setAttribute('aria-labelledby', 'task-cost-title');
+    dialog.style.cssText = 'position:fixed;inset:0;margin:auto;max-height:calc(100dvh - 48px);overflow:auto;width:min(340px,calc(100vw - 48px));box-sizing:border-box;border:1px solid #7185aa;border-radius:18px;padding:24px;background:#101a35;color:white;font-family:inherit;';
+    dialog.innerHTML = '<h2 id="task-cost-title" style="font-size:20px;margin:0 0 14px">開始任務</h2><p data-name></p><p data-cost></p><div style="display:flex;gap:12px;margin-top:24px"><button type="button" data-cancel style="flex:1;padding:12px;border-radius:10px">取消</button><button type="button" data-agree style="flex:1;padding:12px;border-radius:10px;background:#71e2c4;color:#10253a;font-weight:bold">同意並開始</button></div>';
+    dialog.querySelector('[data-name]').textContent = task.title || task.name || '任務';
+    dialog.querySelector('[data-cost]').textContent = '本次進入需扣除 ' + task.entryCost + ' 金幣，是否開始？';
+    document.body.appendChild(dialog);
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = agreed => {
+            if (settled) return;
+            settled = true; dialog.close(); dialog.remove(); resolve(agreed);
+        };
+        dialog.querySelector('[data-cancel]').onclick = () => finish(false);
+        dialog.querySelector('[data-agree]').onclick = () => finish(true);
+        dialog.addEventListener('cancel', event => { event.preventDefault(); finish(false); });
+        dialog.showModal();
+        dialog.querySelector('[data-cancel]').focus();
+        preloadTaskHome(task);
+    });
+}
+
+// 付費任務先確認並預載；同意後扣款成功才載入任務。
 export async function openTask(task, currentUser, onCoinsChanged) {
     if (!currentUser) {
-        alert('請先登記通行證');
+        await platformAlert('請先持船員證報到');
         return { ok: false };
     }
+    if (activeTaskOverlay || taskOpening) return { ok: false }; // 已經有任務開著（理論上任務視窗會蓋住大廳，點不到）
 
-    // 先在使用者點擊的同一個呼叫堆疊裡開一個空白分頁，保住瀏覽器判斷「這是使用者主動觸發」的
-    // 資格——iOS Safari 對這件事特別嚴格，只要中間隔了一個 await 才呼叫 window.open，幾乎必定
-    // 被彈出視窗攔截器擋下（先前的版本就是這樣寫壞的，註解寫著要小心但實作沒照做）。
-    // 確認扣款/查成績都沒問題後，再把這個已經開好的分頁導向到真正的任務網址。
-    const win = window.open('', '_blank');
-    if (!win) {
-        alert('視窗被瀏覽器擋下了，請允許本網站開啟新分頁');
-        return { ok: false };
-    }
+    taskOpening = true;
+    try {
+        if (Number(task.entryCost) > 0 && !(await confirmTaskCost(task))) return { ok: false, cancelled: true };
+        const { el, iframe } = createTaskOverlay(task);
+        activeTaskOverlay = { taskId: task.id, el, iframe };
 
-    // 扣款的同時平行查詢玩家在這個任務的個人最佳成績（架構調整討論記錄第四輪、方案A）：
-    // 扣款本來就要 await，順便平行查成績幾乎不增加等待時間，查詢結果有 sessionStorage 快取。
-    const [costResult, myScore] = await Promise.all([
-        deductTaskCost(currentUser.uid, task),
-        fetchMyScore(task.id, currentUser.uid)
-    ]);
-    if (!costResult.ok) {
-        win.close(); // 扣款失敗，把剛剛開好但還沒用到的空白分頁關掉，不留著一片空白的分頁
-        alert(costResult.reason);
-        return { ok: false };
-    }
-    if (costResult.newCoins !== undefined) onCoinsChanged(costResult.newCoins, costResult.guard);
+        // 扣款的同時平行查詢玩家在這個任務的個人最佳成績：扣款本來就要 await，
+        // 順便平行查成績幾乎不增加等待時間，查詢結果有 sessionStorage 快取。
+        const [costResult, myScore] = await Promise.all([
+            deductTaskCost(currentUser.uid, task),
+            fetchMyScore(task.id, currentUser.uid)
+        ]);
+        if (!costResult.ok) {
+            closeTaskOverlay(task.id); // 扣款失敗，收掉還沒載入任務的視窗
+            await platformAlert(costResult.reason);
+            return { ok: false };
+        }
+        if (costResult.newCoins !== undefined) onCoinsChanged(costResult.newCoins, costResult.guard);
 
-    win.location = task.link;
-
-    const origin = new URL(task.link, location.href).origin;
-    openTaskWindows.set(task.id, { win, origin, myScore });
-    return { ok: true };
+        // iframe.contentWindow 在同一個 iframe 裡換頁時仍是同一個物件，
+        // 任務頁面載入後送來的訊息，event.source 會等於這裡記下的 win。
+        const origin = new URL(task.link, location.href).origin;
+        if (activeTaskOverlay?.el !== el) return { ok: false };
+        openTaskWindows.set(task.id, { win: iframe.contentWindow, origin, myScore });
+        iframe.src = task.link;
+        return { ok: true };
+    } finally { taskOpening = false; }
 }
 
 // 掛上全站唯一的訊息監聽器，在平台初始化時呼叫一次
@@ -222,10 +368,21 @@ export function initTaskMessageListener(getCurrentUser, onUserProfileChanged) {
                         nickname: currentUser.nickname,
                         badges: currentUser.badges || [],
                         certificates: currentUser.certificates || [],
+                        itemTickets: currentUser.itemTickets || [],
                         myScore: entry.myScore ?? null
                     }
                 }, entry.origin);
                 break;
+
+            case 'use_item_ticket': {
+                const { itemId, requestId } = msg.payload || {};
+                const result = await useItemTicket(uid, msg.taskId, itemId, requestId);
+                if (getCurrentUser()?.uid !== uid || openTaskWindows.get(msg.taskId) !== entry) break;
+                if (result.itemTickets) onUserProfileChanged({ ...getCurrentUser(), itemTickets: result.itemTickets, dailyGuard: result.guard ?? getCurrentUser().dailyGuard });
+                entry.win.postMessage({ source: 'culture-platform', version: 1, taskId: msg.taskId,
+                    type: 'item_ticket_result', requestId, itemId, ...result }, entry.origin);
+                break;
+            }
 
             case 'complete': {
                 const detail = { coinsAwarded: 0, badgesAwarded: [], certificatesAwarded: [] };
@@ -302,7 +459,9 @@ export function initTaskMessageListener(getCurrentUser, onUserProfileChanged) {
 
             case 'exit':
                 openTaskWindows.delete(msg.taskId);
+                closeTaskOverlay(msg.taskId); // 任務自己的「關閉／返回」：收掉平台上的任務視窗
                 break;
         }
     });
 }
+

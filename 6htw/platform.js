@@ -34,7 +34,14 @@ const PLATFORM = {
     // 真正被平台用 window.open() 開出來的，它的 .opener 才指得回平台。這裡只是
     // 用來判斷「連線鏈路上有沒有一個 opener 存在」，不代表送訊息時可以直接
     // postMessage 到這個對象上（見下面 sendToPlatform 的說明）。
-    connected: (typeof window !== 'undefined' && !!(window.top || window).opener),
+    // 兩種情況算「有連上平台」：
+    //  1. 被嵌在平台的任務視窗裡（被嵌在框架中，但不是自己的桌機外框 desktop.html；
+    //     桌機外框載入時網址會帶 ?embedded=1，平台的任務視窗不會帶）
+    //  2. 舊流程：由平台以新分頁開啟（自己的分頁或桌機外框那一層有 opener）
+    connected: (typeof window !== 'undefined') && (
+        (window.self !== window.top && new URLSearchParams(location.search).get('embedded') !== '1')
+        || !!(window.top || window).opener
+    ),
     ready: false,           // 是否已收到 player_info
     nickname: null,
     badgeIds: [],           // 平台回傳的「玩家擁有的全部徽章」（不分任務）
@@ -168,14 +175,64 @@ function exitToPlatform() {
     // 桌機外框模式下要關的是 window.top（desktop.html 那個真正的視窗），
     // 不是這個 iframe 自己——iframe 沒有「關閉自己」這回事，window.close()
     // 對 iframe 呼叫不會有任何效果。
+    // 在平台的任務視窗裡：平台收到 exit 會自己收掉任務視窗，不能去關上層視窗（那是平台本身）
+    if (window.self !== window.top && new URLSearchParams(location.search).get('embedded') !== '1') return;
     if (PLATFORM.connected) setTimeout(function () { (window.top || window).close(); }, 150);
 }
 
 // 遊戲進行中按下「返回」：先二次確認，避免手滑中斷正在進行的一局。
-function confirmExitDuringGame() {
-    if (window.confirm('確定要離開任務、返回平台嗎？\n目前這一局的進度不會被保留。')) {
+// 沿用遊戲現有卡片預覽的置中遮罩、卡片與確認／取消按鈕樣式。
+let gameMessagePending = null;
+function showGameMessage(message, confirm = false) {
+    if (gameMessagePending) return gameMessagePending;
+    const overlay = document.createElement('div');
+    overlay.className = 'game-message-overlay';
+    overlay.style.display = 'flex';
+    overlay.style.visibility = 'visible';
+    overlay.style.opacity = '1';
+    overlay.style.zIndex = '10000';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', confirm ? '返回平台' : '提示');
+    overlay.innerHTML = '<div class="game-message-container"><div class="preview-detail-card" style="border-color:#77D9A8;padding:22px;box-sizing:border-box;color:#173b32"><h2 style="font-size:20px;margin:0 0 12px"></h2><p style="white-space:pre-line;line-height:1.7;margin:0"></p></div><div class="preview-controls"><button type="button" data-ok class="preview-btn btn-confirm" aria-label="確定">✔</button><button type="button" data-cancel class="preview-btn btn-cancel" aria-label="取消">✕</button></div></div>';
+    overlay.querySelector('h2').textContent = confirm ? '返回平台' : '提示';
+    overlay.querySelector('p').textContent = message;
+    overlay.querySelector('[data-cancel]').hidden = !confirm;
+    if (!confirm) overlay.querySelector('[data-cancel]').style.display = 'none';
+    const previousFocus = document.activeElement;
+    document.body.appendChild(overlay);
+    gameMessagePending = new Promise(resolve => {
+        const finish = result => {
+            document.removeEventListener('keydown', onKey, true);
+            overlay.remove(); gameMessagePending = null;
+            if (previousFocus?.isConnected) previousFocus.focus();
+            resolve(result);
+        };
+        const onKey = event => {
+            if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(false); }
+            if (event.key === 'Tab') {
+                event.preventDefault();
+                const other = document.activeElement === overlay.querySelector('[data-ok]') && confirm ? '[data-cancel]' : '[data-ok]';
+                overlay.querySelector(other).focus();
+            }
+        };
+        overlay.querySelector('[data-ok]').onclick = () => finish(true);
+        overlay.querySelector('[data-cancel]').onclick = () => finish(false);
+        document.addEventListener('keydown', onKey, true);
+        overlay.querySelector(confirm ? '[data-cancel]' : '[data-ok]').focus();
+    });
+    return gameMessagePending;
+}
+
+let exitPromptPending = false;
+async function confirmExitDuringGame() {
+    if (exitPromptPending) return;
+    exitPromptPending = true;
+    try {
+    if (await showGameMessage('確定要離開任務、返回平台嗎？\n目前這一局的進度不會被保留。', true)) {
         exitToPlatform();
     }
+    } finally { exitPromptPending = false; }
 }
 
 // 結算畫面的「關閉」按鈕：不需要二次確認（已經是結算畫面，沒有進行中的局要中斷）。

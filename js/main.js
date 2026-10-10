@@ -1,3 +1,5 @@
+import { platformConfirm, platformAlert } from './platformDialogs.js';
+import { buyItemTicket } from './itemTickets.js';
 // =====================================================================
 // 在地文化知識型互動平台 — 主程式
 // =====================================================================
@@ -12,6 +14,8 @@ import { claimDailyLogin, redeemShopItem } from './coins.js';
 import { openTask, initTaskMessageListener } from './tasks.js';
 import { fetchLeaderboard } from './leaderboard.js';
 import { openDailySlot } from './dailySlot.js';
+import { openCrewCard, closeCrewCard, getCrewTitle } from './crewCard.js';
+import { openInstallGuide, runStartupInstallCheck, updateMenuEntry } from './installGuide.js';
 
 let currentUser = null;
 let siteData = { banners: [], tasks: [], news: [], badges: {}, certificates: {}, avatarPresets: [] };
@@ -28,7 +32,7 @@ let selectedAvatarId = null;
         if (ua.indexOf('Android') > -1) {
             window.location.href = `intent://${currentUrl.replace(/^https?:\/\//, '')}#Intent;scheme=https;package=com.android.chrome;end`;
         } else if (ua.indexOf('iPhone') > -1 || ua.indexOf('iPad') > -1) {
-            alert('為了確保平台體驗，請點擊右下角『...』並選擇『以預設瀏覽器開啟』！');
+            void platformAlert('為了確保平台體驗，請點擊右下角『...』並選擇『以預設瀏覽器開啟』！', '開啟方式提醒');
         }
     }
 })();
@@ -63,7 +67,7 @@ function computeLevel(user) {
 function computeUnlockStatus(task, user) {
     const conditions = task.unlockConditions || [];
     if (conditions.length === 0) return { canPlay: true, reason: '自由參加' };
-    if (!user) return { canPlay: false, reason: '請先登記通行證' };
+    if (!user) return { canPlay: false, reason: '請先持船員證報到' };
 
     const today = Date.now();
     const reasons = [];
@@ -167,14 +171,14 @@ function showToast(text) {
 window.toggleAuthMode = function () {
     isRegisterMode = !isRegisterMode;
 
-    document.getElementById('auth-title').innerText = isRegisterMode ? '申請加入探索隊' : '通行證登記';
+    document.getElementById('auth-title').innerText = isRegisterMode ? '申請船員證' : '船員報到';
     document.getElementById('auth-sub').innerText = isRegisterMode
-        ? '第一次來嗎？建立你自己的通行證'
-        : '已有帳號的隊員，請在這裡登入';
-    document.getElementById('auth-submit-text').innerText = isRegisterMode ? '核發通行證' : '登記';
+        ? '第一次來嗎？申請你的船員證'
+        : '已有船員證的船員，請在這裡登入';
+    document.getElementById('auth-submit-text').innerText = isRegisterMode ? '核發船員證' : '報到';
     document.getElementById('auth-toggle-link').innerText = isRegisterMode
-        ? '已經有通行證了？點此登入'
-        : '還沒有通行證？點此申請加入';
+        ? '已經有船員證了？點此報到'
+        : '還沒有船員證？點此申請加入';
 
     // 模式標籤+卡片強調色一起換，兩個畫面外觀不能靠仔細看文字才分得出來
     document.getElementById('auth-mode-badge').innerText = isRegisterMode ? '📝 註冊模式' : '🔑 登入模式';
@@ -280,6 +284,16 @@ window.handleLogout = async function () {
     document.getElementById('auth-modal').classList.remove('hidden');
 };
 
+window.openMyCrewCard = function () {
+    document.getElementById('user-menu').classList.add('hidden');
+    if (!currentUser) {
+        document.getElementById('auth-modal').classList.remove('hidden');
+        return;
+    }
+    const avatar = siteData.avatarPresets.find(a => a.id === currentUser.avatarId);
+    openCrewCard({ user: currentUser, avatar: avatar?.emoji || '🙂', level: computeLevel(currentUser) });
+};
+
 window.toggleUserMenu = function () {
     document.getElementById('user-menu').classList.toggle('hidden');
 };
@@ -313,7 +327,9 @@ function renderUserBar() {
     const avatarEl = document.getElementById('user-avatar');
     const progressWrap = document.getElementById('level-progress-wrap');
     if (!currentUser) {
-        document.getElementById('user-name').innerText = '未登記隊員';
+        document.getElementById('user-name').innerText = '尚未報到的船員';
+        document.getElementById('user-crew-title').textContent = '';
+        document.getElementById('user-crew-title').classList.add('hidden');
         document.getElementById('user-level').innerText = 'Lv.0';
         document.getElementById('user-coins').innerText = '0';
         avatarEl.innerText = '🧭';
@@ -324,6 +340,8 @@ function renderUserBar() {
     const avatar = siteData.avatarPresets.find(a => a.id === currentUser.avatarId);
     const levelInfo = computeLevelInfo(currentUser);
     document.getElementById('user-name').innerText = currentUser.nickname;
+    document.getElementById('user-crew-title').textContent = getCrewTitle(levelInfo.level);
+    document.getElementById('user-crew-title').classList.remove('hidden');
     document.getElementById('user-level').innerText = `Lv.${levelInfo.level}`;
     document.getElementById('user-coins').innerText = currentUser.coins;
     avatarEl.innerText = avatar?.emoji || '🙂';
@@ -500,6 +518,13 @@ async function markNewsAsRead() {
 
 /* ---------------- 探索背包 ---------------- */
 function renderBag() {
+    if (!currentUser) return;
+    const ownedTickets = currentUser.itemTickets || [];
+    document.getElementById('item-ticket-section').classList.toggle('hidden', ownedTickets.length === 0);
+    document.getElementById('item-ticket-grid').innerHTML = ownedTickets.map(id => {
+        const item = (siteData.shopItems || []).find(it => it.id === id);
+        return `<button class="collectible" onclick="window.showItemTicketDetail('${id}')"><span class="collectible-icon">${item?.iconUrl ? `<img src="${escapeHtml(item.iconUrl)}" alt="">` : '🎟️'}</span><span class="collectible-name">${escapeHtml(item?.name || id)}</span></button>`;
+    }).join('');
     const badgeGrid = document.getElementById('badge-grid');
     badgeGrid.innerHTML = Object.entries(siteData.badges).map(([id, b]) => {
         const owned = currentUser.badges.includes(id);
@@ -540,39 +565,56 @@ window.closeDetailModal = function () {
 };
 
 /* ---------------- 商店 ---------------- */
+let redeemBusy = false;
+window.showItemTicketDetail = function(id) {
+    const item = (siteData.shopItems || []).find(it => it.id === id);
+    document.getElementById('detail-modal-title').innerText = item?.name || id;
+    document.getElementById('detail-modal-body').innerHTML = `<p>${escapeHtml(item?.description || '在指定任務中使用，使用後消耗。')}</p><p class="detail-meta">已持有一張・使用後可重新購買</p>`;
+    document.getElementById('detail-modal').classList.remove('hidden');
+};
 function renderShop() {
-    const listEl = document.getElementById('shop-list');
-    const items = siteData.shopItems || [];
-    if (!items.length) { listEl.innerHTML = `<p class="empty-hint">目前沒有可兌換的品項</p>`; return; }
-
-    listEl.innerHTML = items.map(it => {
-        const canAfford = currentUser.coins >= (it.cost || 0);
-        return `
-        <div class="shop-card">
-            <div class="shop-thumb">${it.iconUrl ? `<img src="${it.iconUrl}" alt="">` : '🎁'}</div>
-            <div class="shop-info">
-                <h4 class="shop-title">${it.name}</h4>
-                <p class="shop-desc">${it.description || ''}</p>
-            </div>
-            <button class="task-btn" ${canAfford ? '' : 'disabled'} onclick="window.handleRedeem('${it.id}')">
-                <span class="coin-icon-wrap">🪙${it.cost || 0}</span>
-            </button>
-        </div>`;
+    if (!currentUser) return;
+    const items = (siteData.shopItems || []).filter(it => it.isActive !== false);
+    document.getElementById('shop-list').innerHTML = [
+        { ticket: false, name: '店家商品', text: '兌換成功後，請將收據畫面截圖給店家核銷。' },
+        { ticket: true, name: '道具券', text: '購買後存入背包，在指定任務中使用。每種最多持有一張，使用後消耗。' }
+    ].map(group => {
+        const rows = items.filter(it => (it.type === 'item_ticket') === group.ticket);
+        return `<h3 class="section-label">${group.name}</h3><p class="shop-category-note">${group.text}</p>` + (rows.map(it => {
+            const owned = group.ticket && (currentUser.itemTickets || []).includes(it.id);
+            const disabled = redeemBusy || owned || currentUser.coins < it.cost;
+            return `<div class="shop-card ${group.ticket ? 'item-ticket' : ''}"><div class="shop-thumb">${it.iconUrl ? `<img src="${it.iconUrl}" alt="">` : group.ticket ? '🎟️' : '🎁'}</div><div class="shop-info"><h4 class="shop-title">${escapeHtml(it.name)}</h4><p class="shop-desc">${escapeHtml(it.description || '')}</p></div><button class="task-btn" ${disabled ? 'disabled' : ''} onclick="window.handleRedeem('${it.id}')">${owned ? '已持有' : '🪙' + it.cost}</button></div>`;
+        }).join('') || '<p class="empty-hint">目前沒有上架品項</p>');
     }).join('');
 }
 
 window.handleRedeem = async function (itemId) {
     const item = (siteData.shopItems || []).find(i => i.id === itemId);
-    if (!item || !currentUser) return;
-    if (!confirm(`確定要用 ${item.cost} 金幣兌換「${item.name}」嗎？`)) return;
+    if (!item || item.isActive === false || !currentUser || redeemBusy) return;
+    const buyerUid = currentUser.uid;
+    const ticket = item.type === 'item_ticket';
+    if (ticket && (currentUser.itemTickets || []).includes(item.id)) return;
+    redeemBusy = true;
+    const agreed = await platformConfirm(`確定要用 ${item.cost} 金幣${ticket ? '購買' : '兌換'}「${item.name}」嗎？`, ticket ? '購買道具券' : '兌換商品', ticket ? '確認購買' : '確認兌換');
+    if (!agreed || currentUser?.uid !== buyerUid) { redeemBusy = false; renderShop(); return; }
+    renderShop();
+    let r;
+    try { r = await (ticket ? buyItemTicket(buyerUid, item) : redeemShopItem(buyerUid, item)); }
+    finally { redeemBusy = false; renderShop(); }
+    if (currentUser?.uid !== buyerUid) return;
+    if (!r.ok) { await platformAlert(r.reason || '兌換失敗，請稍後再試', '交易未完成'); return; }
 
-    const r = await redeemShopItem(currentUser.uid, item);
-    if (!r.ok) { alert(r.reason || '兌換失敗，請稍後再試'); return; }
-
-    currentUser = { ...currentUser, coins: r.newCoins, dailyGuard: r.guard };
+    currentUser = { ...currentUser, coins: r.newCoins, dailyGuard: r.guard, ...(ticket ? { itemTickets: r.itemTickets } : {}) };
     renderUserBar();
     renderShop();
 
+    renderTasks();
+    renderBag();
+    if (ticket) {
+        window.showItemTicketDetail(item.id);
+        document.getElementById('detail-modal-title').innerText = '購買成功，已存入背包！';
+        return;
+    }
     // 兌換成功後，把這張「收據」用詳情彈窗顯示出來，玩家截圖給店家看即可核銷
     document.getElementById('detail-modal-title').innerText = '兌換成功！';
     document.getElementById('detail-modal-body').innerHTML = `
@@ -692,6 +734,10 @@ function hideLoadingScreen() {
 setTimeout(hideLoadingScreen, 10000);
 
 async function init() {
+    // PWA：程式一開始就立刻檢查有沒有安裝，沒有就馬上顯示安裝畫面（不等內容載入或登入），
+    // 平台在畫面背後照常載入。這裡不 await，下方每日拉霸之前才等它關閉。
+    runStartupInstallCheck();
+
     try {
         await loadAllContent();
     } catch (err) {
@@ -703,18 +749,38 @@ async function init() {
 
     initTaskMessageListener(
         () => currentUser,
-        (updatedUser) => { currentUser = updatedUser; renderUserBar(); renderTasks(); }
+        (updatedUser) => { if (currentUser?.uid !== updatedUser.uid) return; currentUser = { ...currentUser, ...updatedUser }; renderUserBar(); renderTasks(); renderBag(); renderShop(); }
     );
 
+    // PWA：使用者選單的「安裝到主畫面」入口（已經是 App 模式時自動隱藏）
+    window.openInstallGuide = () => { document.getElementById('user-menu').classList.add('hidden'); openInstallGuide(); };
+    updateMenuEntry();
+
     watchAuthState(async (user) => {
+        closeCrewCard();
         currentUser = user;
         renderUserBar();
         renderTasks();
         renderNewsBadgeDot();
         document.getElementById('auth-modal').classList.toggle('hidden', !!user);
         hideLoadingScreen(); // 內容跟登入狀態都確認完了，這時候才收起「連線中」畫面
+        // 等安裝畫面關閉才進行每日拉霸，避免兩個視窗疊在一起（安裝畫面在 init 一開始就已顯示，
+        // 這裡拿到的是同一個檢查結果）。安裝完成的人畫面不會關閉，拉霸要到主畫面 App 裡領。
+        await runStartupInstallCheck();
         if (user) await maybeClaimDailyLogin();
     });
 }
 
 init();
+
+// PWA：註冊 Service Worker（放在網站根目錄的 sw.js），負責圖片音樂快取加速。
+// 等頁面載入完才註冊，避免跟首頁需要的資源搶網路。路徑用相對路徑，
+// 正式網址根目錄或測試用 repo 的子路徑都能正確找到。
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(err => console.warn('Service Worker 註冊失敗', err));
+    });
+}
+
+
+

@@ -573,7 +573,7 @@ function renderShopItemsList() {
     wrap.innerHTML = items.map((it, i) => `<div class="item-row ${it.isActive === false ? 'inactive' : ''}">
         ${it.iconUrl ? `<img class="item-thumb" src="${it.iconUrl}">` : `<div class="item-thumb"></div>`}
         <div class="item-info"><div class="item-title">${escapeHtml(it.name)} <span style="color:#999;font-weight:400;">(${it.id})</span></div>
-            <div class="item-meta">${it.cost || 0} 金幣 · ${it.isActive === false ? '已下架' : '上架中'}</div></div>
+            <div class="item-meta">${it.type === 'item_ticket' ? '道具券' : '店家商品'} · ${it.cost || 0} 金幣 · ${it.isActive === false ? '已下架' : '上架中'}</div></div>
         <div class="item-actions">
             <button class="icon-btn edit" onclick="window.editShopItem(${i})">編輯</button>
             <button class="icon-btn toggle" onclick="window.toggleShopItemActive(${i})">${it.isActive === false ? '上架' : '下架'}</button>
@@ -585,6 +585,8 @@ function renderShopItemsList() {
 window.editShopItem = function (index) {
     const it = editState.shopItems.items[index];
     document.getElementById('shopItems-id').value = it.id;
+    document.getElementById('shopItems-type').value = it.type || 'merchant';
+    document.getElementById('shopItems-taskId').value = it.taskId || '';
     document.getElementById('shopItems-name').value = it.name || '';
     document.getElementById('shopItems-description').value = it.description || '';
     document.getElementById('shopItems-cost').value = it.cost || 0;
@@ -630,13 +632,20 @@ window.submitShopItem = async function (e) {
             return false;
         }
 
+        const type = document.getElementById('shopItems-type').value;
+        const taskId = document.getElementById('shopItems-taskId').value.trim();
+        const cost = Number(document.getElementById('shopItems-cost').value);
+        if (!Number.isInteger(cost) || cost < 1 || cost > 300) throw new Error('價格必須是 1～300 的整數。');
+        if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error('商品 ID 需為 1～80 個英數字、底線或連字號。');
+        if (type === 'item_ticket' && !/^[A-Za-z0-9_-]{1,80}$/.test(taskId)) throw new Error('請填寫有效的適用任務 ID。');
+        if (existing?.type === 'item_ticket' && (type !== 'item_ticket' || taskId !== existing.taskId)) throw new Error('既有道具券請保留分類及適用任務；如需不同用途，請新增商品 ID。');
         const iconUrl = await uploadPendingImage('shopItems', existing?.iconUrl);
         const data = {
             id,
             name: document.getElementById('shopItems-name').value,
             description: document.getElementById('shopItems-description').value || '',
             iconUrl,
-            cost: Number(document.getElementById('shopItems-cost').value) || 0,
+            cost, type, taskId: type === 'item_ticket' ? taskId : null,
             sortOrder: Number(document.getElementById('shopItems-sortOrder').value) || 0,
             isActive: existing ? existing.isActive !== false : true
         };
@@ -1006,8 +1015,11 @@ window.userPickerSearch = function (coll, query) {
 function renderUserEditForm(uid, u) {
     const area = document.getElementById('user-edit-area');
     window.__userEditPicked = { badges: [...(u.badges || [])], certificates: [...(u.certificates || [])] };
+    const ticketItems = (editState.shopItems.items || []).filter(item => item.type === 'item_ticket');
+    const ticketIds = [...new Set([...ticketItems.map(item => item.id), ...(u.itemTickets || [])])];
     area.innerHTML = `
         <form class="entity-form" onsubmit="return window.submitUserEdit(event, '${uid}')">
+            <div class="field"><label>道具券（勾選持有，取消可移除）</label>${ticketIds.map(id => `<label><input name="itemTicket" type="checkbox" value="${escapeHtml(id)}" ${(u.itemTickets || []).includes(id) ? 'checked' : ''}>${escapeHtml(ticketItems.find(item => item.id === id)?.name || id)}</label>`).join('') || '目前沒有道具券商品'}</div>
             <div class="field"><label>暱稱</label><input name="nickname" value="${escapeHtml(u.nickname || '')}"></div>
             <div class="two-col">
                 <div class="field"><label>等級（自動計算，不可手動改）</label><input value="Lv.${computeLevelAdmin(u)}" disabled style="opacity:0.7;"></div>
@@ -1202,7 +1214,10 @@ window.submitUserEdit = async function (e, uid) {
     const badges = [...window.__userEditPicked.badges];
     const certificates = [...window.__userEditPicked.certificates];
     try {
-        await updateDoc(doc(db, 'users', uid), { nickname, coins, badges, certificates });
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        const shownIds = [...e.target.querySelectorAll('input[name="itemTicket"]')].map(input => input.value);
+        const itemTickets = [...new Set([...(userSnap.data()?.itemTickets || []).filter(id => !shownIds.includes(id)), ...f.getAll('itemTicket')])];
+        await updateDoc(doc(db, 'users', uid), { nickname, coins, badges, certificates, itemTickets });
         showMsg('users', '已儲存');
         const level = computeLevelAdmin({ badges, certificates });
         updateUserRowLocally(uid, { nickname, coins, level });
@@ -1231,13 +1246,15 @@ window.deleteUserAccount = async function (uid, nickname) {
         await Promise.all(tasks.map(t => deleteDoc(doc(db, 'leaderboard', t.id, 'entries', uid)).catch(() => {})));
 
         // 清空金幣明細、商店兌換紀錄這兩個子集合
-        const [ledgerSnap, redemptionsSnap] = await Promise.all([
+        const [ledgerSnap, redemptionsSnap, ticketUsesSnap] = await Promise.all([
             getDocs(collection(db, 'coinLedger', uid, 'entries')),
-            getDocs(collection(db, 'shopRedemptions', uid, 'entries'))
+            getDocs(collection(db, 'shopRedemptions', uid, 'entries')),
+            getDocs(collection(db, 'itemTicketUses', uid, 'entries'))
         ]);
         await Promise.all([
             ...ledgerSnap.docs.map(d => deleteDoc(d.ref)),
-            ...redemptionsSnap.docs.map(d => deleteDoc(d.ref))
+            ...redemptionsSnap.docs.map(d => deleteDoc(d.ref)),
+            ...ticketUsesSnap.docs.map(d => deleteDoc(d.ref))
         ]);
 
         // 釋出使用者名稱保留紀錄（注意：Auth 帳號本身還在，這個名稱換算出來的內部信箱

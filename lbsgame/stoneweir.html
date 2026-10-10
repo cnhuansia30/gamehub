@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+
+<script src="task-dialogs.js"></script>
 <script>
     /* 桌機/寬螢幕自動導向「手機外框」展示版（stoneweir-desktop.html），
        手機直接開（寬度 <=700）完全不受影響、不會跳轉。 */
@@ -17,7 +19,7 @@
 <title>石滬修復</title>
 <link rel="icon" type="image/png" href="image/sricon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <style>
   :root{
     --ocean-deep:#063d78;
@@ -585,7 +587,7 @@
   <div class="screen active" id="screen-intro">
     <div class="intro-frame">
     <div class="intro-media">
-      <img src="image/srbg.png" alt="石滬修復玩法說明">
+      <img fetchpriority="high" src="image/srbg.png" alt="石滬修復玩法說明">
       <button class="intro-go-btn" id="startBtn" aria-label="開始遊戲" title="開始遊戲"></button>
     </div>
     <div class="intro-stats" id="introStats"></div>
@@ -752,6 +754,7 @@
   </div>
 </div>
 
+<script src="start-ticket.js"></script>
 <script>
 /* ============ 平台通訊（對應「任務頁面通訊介面規格.md」） ============ */
 const TASK_ID = 'stoneweir';
@@ -787,6 +790,8 @@ function sendToPlatform(type, payload){
 // 延遲一小段時間再關閉，確保訊息有時間走完整趟轉發。
 function exitAndClosePlatform(){
   sendToPlatform('exit', {});
+  // 在平台的任務視窗裡（被嵌在框架中、但不是自己的桌機外框 ?embedded=1）：平台收到 exit 會自己收掉任務視窗，這裡不能去關上層視窗（那是平台本身）
+  if (window.self !== window.top && new URLSearchParams(location.search).get('embedded') !== '1') return;
   setTimeout(function(){ (window.top || window).close(); }, 150);
 }
 
@@ -795,9 +800,9 @@ function exitAndClosePlatform(){
 // 這時候把假紀錄補回去、跳確認視窗；確定要走才真的送 exit + 關閉分頁。
 if (window.history && window.history.pushState) {
   history.pushState(null, '', location.href);
-  window.addEventListener('popstate', function () {
+  window.addEventListener('popstate', async function () {
     history.pushState(null, '', location.href);
-    if (!confirm('確定要返回平台嗎？這局進度不會被保留。')) return;
+    if (!(await taskConfirm('確定要返回平台嗎？這局進度不會被保留。'))) return;
     exitAndClosePlatform();
   });
 }
@@ -1430,20 +1435,20 @@ function updateIntroStats(){
 document.getElementById('startBtn').addEventListener('click', ()=>{ SoundFX.unlock(); SoundFX.uiClick(); startGame(); });
 // 長按畫面時（尤其是石塊、竹簍）避免跳出系統的右鍵/長按選單
 document.addEventListener('contextmenu', (e)=>{ e.preventDefault(); });
-document.getElementById('restartBtn').addEventListener('click', ()=>{
+document.getElementById('restartBtn').addEventListener('click', async ()=>{
   SoundFX.uiClick();
-  if(!confirm('確定要返回平台嗎？這局進度不會被保留。')) return;
+  if(!(await taskConfirm('確定要返回平台嗎？這局進度不會被保留。'))) return;
   exitAndClosePlatform();
 });
 document.getElementById('collectFishBtn').addEventListener('click', ()=>{
-  if(!state || state.over || state.tidePhase !== 'day') return;
+  if(!state || state.over || state.tidePhase !== 'day' || assistantTicketActive) return;
   SoundFX.uiClick?.();
   collectFish();
 });
 document.getElementById('collectFishBtn').addEventListener('keydown', (e)=>{
   if(e.key !== 'Enter' && e.key !== ' ') return;
   e.preventDefault();
-  if(!state || state.over || state.tidePhase !== 'day') return;
+  if(!state || state.over || state.tidePhase !== 'day' || assistantTicketActive) return;
   SoundFX.uiClick?.();
   collectFish();
 });
@@ -1629,6 +1634,7 @@ function scheduleThiefCheck(){
 }
 
 function triggerThiefEvent(){
+  if(assistantTicketActive) return;
   if(!state || state.fishCaught <= 0) return;
   
   const toSteal = Math.min(state.fishCaught, 1 + Math.floor(Math.random()*3));
@@ -1719,7 +1725,7 @@ function playThiefEffect(){
 }
 
 function collectFish(){
-  if(!state || state.over || state.tidePhase !== 'day') return;
+  if(!state || state.over || state.tidePhase !== 'day' || assistantTicketActive) return;
   
   const toCollect = state.fishCaught;
   if(toCollect <= 0) return;
@@ -1840,6 +1846,7 @@ function scheduleTide(){
       if(!state || state.over) return;
       document.getElementById('statFish').textContent = state.fishCaught;
       showFishDelta(fishIn);
+      autoCollectFish();
     }, riseDur);
   }, fishInDelay);
 
@@ -1867,7 +1874,25 @@ function isFullyRepaired(){
   return !!state && state.cells.every(v=>v===0);
 }
 
-function startGame(){
+let assistantTicketActive = false, startingGame = false;
+async function startGame(){
+  if(startingGame) return;
+  startingGame = true;
+  try {
+    assistantTicketActive = await chooseStartTicket(TASK_ID, 'stoneweir_assistant', '助手券', '本局魚群抵達後自動收魚，白天夜晚都有效，保護魚獲不被鳥、小偷或退潮帶走。');
+    startGameWithTicket();
+  } finally { startingGame = false; }
+}
+function autoCollectFish(){
+  if(!assistantTicketActive || !state || state.over || state.fishCaught <= 0) return;
+  state.totalFishCollected += state.fishCaught;
+  state.fishCaught = 0;
+  clearFish();
+  document.getElementById('statFish').textContent = '0';
+  updateCollectedFishDisplay();
+  updateLiveScore();
+}
+function startGameWithTicket(){
   stopTimers();
   // 「再玩一次」是從結算彈窗直接呼叫這個函式，彈窗本身要記得關掉，
   // 不然畫面會變成遊戲畫面已經重新開始、上面卻還蓋著上一局的結算彈窗。
@@ -1899,6 +1924,7 @@ function startGame(){
   document.getElementById('statMoves').textContent = '0';
   document.getElementById('statFish').textContent = '0';
   document.getElementById('statCollected').textContent = '0';
+  document.getElementById('statCollected').nextElementSibling.textContent = '已收';
   document.getElementById('statScore').textContent = String(BASE_SCORE);
   document.getElementById('statScore').parentElement.classList.remove('danger');
   document.getElementById('toolBrokenBanner').classList.remove('show');
@@ -2139,6 +2165,7 @@ function tideStrike(){
 
 /* 退潮時：滬堤缺口（直線+斜線連接的破損比率）越多，魚群就會跟著海水逃出去越多；escapeDurationMs跟退潮動畫時長同步 */
 function ebbFish(escapeDurationMs){
+  if(assistantTicketActive) return;
   if(!state || state.over) return;
   const escapeRatio = countGapRatio(state.cells);
   const escaped = Math.round(state.fishCaught * escapeRatio);
@@ -2169,6 +2196,7 @@ function scheduleBirdCheck(){
 }
 
 function triggerBirdEvent(){
+  if(assistantTicketActive) return;
   const layer = document.getElementById('birdFlyLayer');
   if(!layer || !state.fishList.length) return;
   const idx = Math.floor(Math.random()*state.fishList.length);

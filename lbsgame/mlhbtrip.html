@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<script src="task-dialogs.js"></script>
 <script>
     /* 桌機/寬螢幕自動導向「手機外框」展示版（mlhbtrip-desktop.html），
        手機直接開（寬度 <=700）完全不受影響、不會跳轉。 */
@@ -386,7 +387,7 @@
 </header>
 
 <div class="map-wrap">
-  <img id="map-img" src="image/mlcmap.jpg" alt="苗栗海岸手繪地圖" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'map-missing',textContent:'找不到 mlcmap.jpg，請確認地圖圖片和這個 HTML 檔案放在同一個資料夾'}))">
+  <img fetchpriority="high" id="map-img" src="image/mlcmap.jpg" alt="苗栗海岸手繪地圖" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'map-missing',textContent:'找不到 mlcmap.jpg，請確認地圖圖片和這個 HTML 檔案放在同一個資料夾'}))">
   <div id="pin-layer"></div>
   <div class="map-caption">地圖示意．非精確定位</div>
 </div>
@@ -450,9 +451,9 @@
 
 <script>
 var HARBORS = [
-  { id:'longfeng', short:'龍鳳', name:'竹南龍鳳漁港', lat:24.699778, lng:120.85831, stamp:'image/lfhb.jpg' },
-  { id:'waipu',    short:'外埔', name:'後龍外埔漁港', lat:24.65002,  lng:120.77310, stamp:'image/wphb.jpg' },
-  { id:'yuangang', short:'苑港', name:'苑港觀光漁港', lat:24.4591,   lng:120.64726, stamp:'image/yghb.jpg' }
+  { id:'longfeng', short:'龍鳳', name:'竹南龍鳳漁港', lat:24.700333333333, lng:120.859083333333, stamp:'image/lfhb.jpg' },
+  { id:'waipu',    short:'外埔', name:'後龍外埔漁港', lat:24.651388888889, lng:120.774444444444, stamp:'image/wphb.jpg' },
+  { id:'yuangang', short:'苑港', name:'苑港觀光漁港', lat:24.459111111111, lng:120.64725, stamp:'image/yghb.jpg' }
 ];
 
 // 手繪地圖上三個漁港圖釘的位置（相對圖片寬高的百分比），由標定工具產生
@@ -462,7 +463,7 @@ var PIN_POSITIONS = {
   yuangang: { xPct: 18.27, yPct: 63.44 } // 苑港觀光漁港
 };
 
-var UNLOCK_RADIUS_M = 500; // 解鎖半徑（公尺）
+var UNLOCK_RADIUS_M = 1500; // 解鎖半徑（公尺）
 var KEY_PASSES = 'miaoliHarborPasses';
 var TASK_ID = 'mlhbtrip'; // 對應 data/tasks.json 的任務 id
 
@@ -526,6 +527,8 @@ function sendToPlatform(type, payload){
 // 延遲一小段時間再關閉，確保訊息有時間走完整趟轉發。
 function exitAndClosePlatform(){
   sendToPlatform('exit', {});
+  // 在平台的任務視窗裡（被嵌在框架中、但不是自己的桌機外框 ?embedded=1）：平台收到 exit 會自己收掉任務視窗，這裡不能去關上層視窗（那是平台本身）
+  if (window.self !== window.top && new URLSearchParams(location.search).get('embedded') !== '1') return;
   setTimeout(function(){ (window.top || window).close(); }, 150);
 }
 
@@ -534,9 +537,9 @@ function exitAndClosePlatform(){
 // 這時候把假紀錄補回去、跳確認視窗；確定要走才真的送 exit + 關閉分頁。
 if (window.history && window.history.pushState) {
   history.pushState(null, '', location.href);
-  window.addEventListener('popstate', function () {
+  window.addEventListener('popstate', async function () {
     history.pushState(null, '', location.href);
-    if (!confirm('確定要返回平台嗎？這局進度不會被保留。')) return;
+    if (!(await taskConfirm('確定要返回平台嗎？這局進度不會被保留。'))) return;
     exitAndClosePlatform();
   });
 }

@@ -26,12 +26,14 @@ service cloud.firestore {
     function DAILY_CAP() { return 300; }        // 每人每日金幣淨變動上限
     function MAX_TX_PER_DAY() { return 800; }    // 每人每日交易次數上限
     function MAX_SINGLE_TX() { return 50; }      // 任務單筆金幣異動（獎勵/扣款）上限，不適用於商店兌換
-    function MAX_SHOP_ITEM_COST() { return 200; } // 商店單次兌換上限，跟 MAX_SINGLE_TX 分開算，
+    function MAX_SHOP_ITEM_COST() { return 300; } // 商店單次兌換上限，跟 MAX_SINGLE_TX 分開算，
                                                     // 因為兌換價格是後台自訂的合法金額，不是任務頁面片面宣稱的數字
 
     // ===================================================================
     // 共用工具函式
     // ===================================================================
+
+    function validTicketId(id) { return id is string && id.matches('^[A-Za-z0-9_-]{1,80}$'); }
 
     function isSignedIn() {
       return request.auth != null;
@@ -89,6 +91,7 @@ service cloud.firestore {
         && request.resource.data.coins == 0
         && request.resource.data.badges == []
         && request.resource.data.certificates == []
+        && request.resource.data.get('itemTickets', []) == []
         && request.resource.data.nickname is string
         && request.resource.data.nickname.size() >= 1
         && request.resource.data.nickname.size() <= 20
@@ -100,14 +103,21 @@ service cloud.firestore {
       allow delete: if isAdmin(); // 供後台「刪除玩家」功能使用
 
       // 一般使用者：僅限本人，且只能是下列其中一種「合法異動樣式」
-      allow update: if isOwner(uid) && (
-        isProfileOnlyEdit(resource.data, request.resource.data) ||
-        isDailyLoginClaim(resource.data, request.resource.data) ||
-        isTaskCostDeduction(resource.data, request.resource.data) ||
-        isTaskRewardClaim(resource.data, request.resource.data) ||
-        isCollectibleClaim(resource.data, request.resource.data) ||
-        isShopRedemption(resource.data, request.resource.data)
-      );
+      allow update: if isOwner(uid) && isAllowedUserEdit(resource.data, request.resource.data);
+
+      // 依交易類型進入對應驗證，避免錯誤格式觸發其他分支的欄位讀取及運算上限。
+      function isAllowedUserEdit(before, after) {
+        let type = after.get('lastTransaction', {}).get('type', '');
+        return isProfileOnlyEdit(before, after) ? true
+          : type == 'daily_login' ? isDailyLoginClaim(before, after)
+          : type == 'task_cost' ? isTaskCostDeduction(before, after)
+          : type == 'task_reward' ? isTaskRewardClaim(before, after)
+          : type == 'collectible_award' ? isCollectibleClaim(before, after)
+          : type == 'shop_redemption' ? isShopRedemption(before, after)
+          : type == 'item_ticket_purchase' ? isItemTicketPurchase(before, after)
+          : type == 'item_ticket_use' ? isItemTicketUse(before, after)
+          : false;
+      }
 
       // --- 樣式 1：只改暱稱／頭像／公告已讀時間，不動金幣與 dailyGuard ---
       function isProfileOnlyEdit(before, after) {
@@ -197,6 +207,44 @@ service cloud.firestore {
           && (changedBadges || changedCerts)
           && isValidDailyGuardUpdate(before, after, 0);
       }
+      // 通用道具券流程：目錄由後台管理，規則只驗證扣款、持有上限與消耗。
+      function isItemTicketPurchase(before, after) {
+        let tx = after.lastTransaction;
+        let oldTickets = before.get('itemTickets', []);
+        let receiptPath = /databases/$(database)/documents/shopRedemptions/$(uid)/entries/$(tx.requestId);
+        return tx.type == 'item_ticket_purchase'
+          && validTicketId(tx.itemId)
+          && tx.amount is int && tx.amount > 0 && tx.amount <= MAX_SHOP_ITEM_COST()
+          && tx.requestId is string
+          && tx.requestId.matches('^[A-Za-z0-9_-]{1,80}$')
+          && !(tx.itemId in oldTickets)
+          && after.itemTickets == oldTickets.concat([tx.itemId])
+          && after.coins == before.coins - tx.amount && after.coins >= 0
+          && changedKeys(before, after).hasOnly(['coins', 'itemTickets', 'dailyGuard', 'lastTransaction'])
+          && isValidDailyGuardUpdate(before, after, -tx.amount)
+          && !exists(receiptPath)
+          && getAfter(receiptPath).data.itemId == tx.itemId
+          && getAfter(receiptPath).data.type == 'item_ticket'
+          && getAfter(receiptPath).data.cost == tx.amount;
+      }
+      function isItemTicketUse(before, after) {
+        let tx = after.lastTransaction;
+        let oldTickets = before.get('itemTickets', []);
+        let usagePath = /databases/$(database)/documents/itemTicketUses/$(uid)/entries/$(tx.requestId);
+        return tx.type == 'item_ticket_use'
+          && validTicketId(tx.itemId) && validTicketId(tx.taskId)
+          && tx.requestId is string && tx.requestId.matches('^[A-Za-z0-9_-]{1,80}$')
+          && tx.itemId in oldTickets
+          && after.itemTickets == oldTickets.removeAll([tx.itemId])
+          && after.coins == before.coins
+          && changedKeys(before, after).hasOnly(['itemTickets', 'dailyGuard', 'lastTransaction'])
+          && isValidDailyGuardUpdate(before, after, 0)
+          && !exists(usagePath)
+          && getAfter(usagePath).data.itemId == tx.itemId
+          && getAfter(usagePath).data.taskId == tx.taskId
+          && getAfter(usagePath).data.requestId == tx.requestId;
+      }
+
       // --- 樣式 6：商店兌換扣款。商品目錄跟任務一樣不在 Firestore（放 GitHub），
       //     規則無法核對兌換的品項是否真的存在、金額是否正確，只能限制單筆金額上限
       //     （跟任務用不同的上限 MAX_SHOP_ITEM_COST，因為商店價格是後台自訂的合法金額，
@@ -300,6 +348,25 @@ service cloud.firestore {
     // 只能新增、不能改或刪，避免有人事後竄改兌換紀錄的內容或花費金額。
     // ===================================================================
 
+    match /itemTicketUses/{uid}/entries/{entryId} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['itemId', 'taskId', 'requestId', 'usedAt'])
+        && validTicketId(request.resource.data.itemId)
+        && validTicketId(request.resource.data.taskId)
+        && request.resource.data.requestId == entryId
+        && entryId.matches('^[A-Za-z0-9_-]{1,80}$')
+        && request.resource.data.usedAt is number
+        && request.resource.data.itemId in get(/databases/$(database)/documents/users/$(uid)).data.get('itemTickets', [])
+        && !(request.resource.data.itemId in getAfter(/databases/$(database)/documents/users/$(uid)).data.itemTickets)
+        && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.type == 'item_ticket_use'
+        && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.itemId == request.resource.data.itemId
+        && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.taskId == request.resource.data.taskId
+        && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.requestId == entryId;
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
     match /shopRedemptions/{uid}/entries/{entryId} {
       allow read: if isOwner(uid) || isAdmin();
 
@@ -310,7 +377,17 @@ service cloud.firestore {
         && request.resource.data.cost is number
         && request.resource.data.cost > 0
         && request.resource.data.cost <= MAX_SHOP_ITEM_COST()
-        && request.resource.data.redeemedAt is number;
+        && request.resource.data.redeemedAt is number
+        && (isAdmin() || request.resource.data.get('type', 'merchant') != 'item_ticket' || (
+          validTicketId(request.resource.data.itemId)
+          && request.resource.data.cost is int
+          && request.resource.data.cost == getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.amount
+          && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.type == 'item_ticket_purchase'
+          && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.requestId == entryId
+          && getAfter(/databases/$(database)/documents/users/$(uid)).data.lastTransaction.itemId == request.resource.data.itemId
+          && !(request.resource.data.itemId in get(/databases/$(database)/documents/users/$(uid)).data.get('itemTickets', []))
+          && request.resource.data.itemId in getAfter(/databases/$(database)/documents/users/$(uid)).data.itemTickets
+        ));
 
       allow update: if false;
       allow delete: if isAdmin(); // 供後台「刪除玩家」功能清空兌換紀錄用
