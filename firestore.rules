@@ -113,6 +113,7 @@ service cloud.firestore {
           : type == 'task_cost' ? isTaskCostDeduction(before, after)
           : type == 'task_reward' ? isTaskRewardClaim(before, after)
           : type == 'collectible_award' ? isCollectibleClaim(before, after)
+          : type == 'merchant_purchase' ? isMerchantPurchase(before, after)
           : type == 'shop_redemption' ? isShopRedemption(before, after)
           : type == 'item_ticket_purchase' ? isItemTicketPurchase(before, after)
           : type == 'item_ticket_use' ? isItemTicketUse(before, after)
@@ -249,6 +250,20 @@ service cloud.firestore {
       //     規則無法核對兌換的品項是否真的存在、金額是否正確，只能限制單筆金額上限
       //     （跟任務用不同的上限 MAX_SHOP_ITEM_COST，因為商店價格是後台自訂的合法金額，
       //     不是任務頁面片面宣稱的數字），並受 dailyGuard 總量防護限制 ---
+      function isMerchantPurchase(before, after) {
+        let tx = after.lastTransaction;
+        let receiptPath = /databases/$(database)/documents/shopRedemptions/$(uid)/entries/$(tx.requestId);
+        return tx.amount is int && tx.amount > 0 && tx.amount <= MAX_SHOP_ITEM_COST()
+          && validTicketId(tx.itemId) && validTicketId(tx.requestId)
+          && after.coins == before.coins - tx.amount && after.coins >= 0
+          && changedKeys(before, after).hasOnly(['coins', 'dailyGuard', 'lastTransaction'])
+          && isValidDailyGuardUpdate(before, after, -tx.amount)
+          && !exists(receiptPath)
+          && getAfter(receiptPath).data.type == 'merchant_coupon'
+          && getAfter(receiptPath).data.itemId == tx.itemId
+          && getAfter(receiptPath).data.cost == tx.amount;
+      }
+
       function isShopRedemption(before, after) {
         let tx = after.lastTransaction;
         let cost = before.coins - after.coins;
@@ -344,7 +359,7 @@ service cloud.firestore {
     // ===================================================================
     // 商店兌換紀錄：shopRedemptions/{uid}/entries/{entryId}
     // 玩家兌換商品時的紀錄快照（品項名稱、花費、時間），核銷流程是玩家把這筆紀錄的畫面
-    // 截圖給店家看（信任制，不做系統核銷，見「架構調整討論記錄.md」商店功能那輪討論），
+    // 新店家商品保存獨立券號並以連線交易核銷；舊收據保持原樣，
     // 只能新增、不能改或刪，避免有人事後竄改兌換紀錄的內容或花費金額。
     // ===================================================================
 
@@ -370,7 +385,34 @@ service cloud.firestore {
     match /shopRedemptions/{uid}/entries/{entryId} {
       allow read: if isOwner(uid) || isAdmin();
 
+      function validMerchantCoupon() {
+        let c = request.resource.data;
+        let userPath = /databases/$(database)/documents/users/$(uid);
+        let before = get(userPath).data;
+        let after = getAfter(userPath).data;
+        return c.keys().hasOnly(['type', 'itemId', 'itemName', 'description', 'iconUrl', 'cost',
+            'couponCode', 'redeemedAt', 'issuedAt', 'validUntil', 'expiresAt', 'status', 'usedAt'])
+          && validTicketId(c.itemId) && c.itemName is string && c.itemName.size() <= 60
+          && c.description is string && c.description.size() <= 10000
+          && c.iconUrl is string && c.iconUrl.size() <= 2048
+          && c.couponCode is string && c.couponCode.matches('^[A-Z0-9]{12}$')
+          && c.cost is int && c.cost > 0 && c.cost <= MAX_SHOP_ITEM_COST()
+          && c.redeemedAt is number && c.issuedAt == request.time
+          && c.status == 'available' && c.usedAt == null
+          && c.validUntil is string
+          && ((c.validUntil == '' && c.expiresAt == null)
+            || (c.validUntil.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+              && c.expiresAt is int && c.expiresAt > request.time.toMillis()))
+          && after.lastTransaction.type == 'merchant_purchase'
+          && after.lastTransaction.requestId == entryId
+          && after.lastTransaction.itemId == c.itemId && after.lastTransaction.amount == c.cost
+          && after.coins == before.coins - c.cost;
+      }
+      allow create: if isOwner(uid) && request.resource.data.get('type', '') == 'merchant_coupon'
+        && validMerchantCoupon();
+
       allow create: if (isOwner(uid) || isAdmin())
+        && request.resource.data.get('type', '') != 'merchant_coupon'
         && request.resource.data.itemId is string
         && request.resource.data.itemName is string
         && request.resource.data.itemName.size() <= 60
@@ -389,7 +431,22 @@ service cloud.firestore {
           && request.resource.data.itemId in getAfter(/databases/$(database)/documents/users/$(uid)).data.itemTickets
         ));
 
-      allow update: if false;
+      allow update: if isOwner(uid)
+        && resource.data.get('type', '') == 'merchant_coupon'
+        && resource.data.status == 'available'
+        && request.resource.data.status == 'used'
+        && request.resource.data.usedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'usedAt'])
+        && (resource.data.expiresAt == null || request.time.toMillis() < resource.data.expiresAt);
+      // 清除失效券只更新原券狀態，不新增紀錄，不刪除券。
+      allow update: if isOwner(uid)
+        && resource.data.get('type', '') == 'merchant_coupon'
+        && (resource.data.status == 'used'
+          || (resource.data.status == 'available' && resource.data.expiresAt != null
+            && request.time.toMillis() >= resource.data.expiresAt))
+        && request.resource.data.status == 'cleared'
+        && request.resource.data.clearedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'clearedAt']);
       allow delete: if isAdmin(); // 供後台「刪除玩家」功能清空兌換紀錄用
     }
 
