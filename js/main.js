@@ -340,7 +340,7 @@ window.openAvatarSettings = function () {
     const grid = dialog.querySelector('.system-avatar-grid');
     const status = dialog.querySelector('.avatar-save-status');
     const paint = () => {
-        grid.innerHTML = SYSTEM_AVATARS.map(a => '<button type="button" class="system-avatar-option" data-id="'+a.id+'" aria-pressed="'+(a.id===selection)+'">'+avatarImageHTML(a)+'<span>'+a.name+'</span></button>').join('');
+        grid.innerHTML = SYSTEM_AVATARS.map(a => '<button type="button" class="system-avatar-option" data-id="'+a.id+'" aria-label="'+a.name+'" aria-pressed="'+(a.id===selection)+'">'+avatarImageHTML(a)+'</button>').join('');
         grid.querySelectorAll('button').forEach(button => button.onclick = () => {
             if (saving) return;
             selection = button.dataset.id;
@@ -744,7 +744,7 @@ function renderShop() {
         return `<h3 class="section-label">${group.name}</h3><p class="shop-category-note">${group.text}</p>` + (rows.map(it => {
             const owned = group.ticket && (currentUser.itemTickets || []).includes(it.id);
             const disabled = redeemBusy || owned || currentUser.coins < it.cost;
-            return `<div class="shop-card ${group.ticket ? 'item-ticket' : ''}"><div class="shop-thumb">${it.iconUrl ? `<img src="${it.iconUrl}" alt="">` : group.ticket ? '🎟️' : '🎁'}</div><div class="shop-info"><h4 class="shop-title">${escapeHtml(it.name)}</h4><p class="shop-desc">${escapeHtml(it.description || '')}</p>${!group.ticket ? `<p class="detail-meta">有效期限：${escapeHtml(it.validUntil || '無有效期限')}</p>` : ''}</div><button class="task-btn" ${disabled ? 'disabled' : ''} onclick="window.handleRedeem('${it.id}')">${owned ? '已持有' : '🪙' + it.cost}</button></div>`;
+            return `<article class="shop-card shop-ticket ${group.ticket ? 'item-ticket' : 'merchant-ticket'}"><div class="ticket-main"><div class="ticket-heading"><div class="shop-thumb">${it.iconUrl ? `<img src="${it.iconUrl}" alt="">` : group.ticket ? '🎟️' : '🎁'}</div><div class="ticket-heading-text"><span class="ticket-kind">${group.ticket ? '任務道具券' : '店家商品'}</span><h4 class="shop-title">${escapeHtml(it.name)}</h4></div></div><p class="shop-desc">${escapeHtml(it.description || '')}</p>${!group.ticket ? `<p class="detail-meta">有效期限：${escapeHtml(it.validUntil || '無有效期限')}</p>` : ''}</div><div class="ticket-stub"><span class="ticket-stub-label">金幣兌換</span><button class="task-btn" ${disabled ? 'disabled' : ''} onclick="window.handleRedeem('${it.id}')">${owned ? '已持有' : it.cost+'<small>金幣</small>'}</button><span class="ticket-stub-mark" aria-hidden="true"></span></div></article>`;
         }).join('') || '<p class="empty-hint">目前沒有上架品項</p>');
     }).join('');
 }
