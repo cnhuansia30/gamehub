@@ -148,5 +148,23 @@
     "sortOrder": 0,
     "hasLeaderboard": false,
     "isActive": true
+  },
+  {
+    "id": "livegame",
+    "bannerUrl": null,
+    "title": "魚丸追追樂競賽版",
+    "description": "",
+    "colorTheme": "mint",
+    "link": "https://ericvu-cd.github.io/livegame/fishball-race.html",
+    "entryCost": 0,
+    "unlockConditions": [
+      {
+        "type": "LEVEL",
+        "value": 0
+      }
+    ],
+    "sortOrder": 9,
+    "hasLeaderboard": false,
+    "isActive": true
   }
 ]
