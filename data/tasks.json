@@ -128,28 +128,6 @@
     "isActive": true
   },
   {
-    "id": "0",
-    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1790230385501_fgbnr.jpg",
-    "title": "友魚小學堂",
-    "description": "食魚樂園",
-    "colorTheme": "mint",
-    "link": "https://game.hs30.org.tw/fishguide/fishguide.html",
-    "entryCost": 0,
-    "unlockConditions": [
-      {
-        "type": "LEVEL",
-        "value": 0
-      },
-      {
-        "type": "COIN",
-        "value": 0
-      }
-    ],
-    "sortOrder": 0,
-    "hasLeaderboard": false,
-    "isActive": true
-  },
-  {
     "id": "livegame",
     "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1793962571166_fbbnrlive.jpg",
     "title": "魚丸追追樂競賽版",
