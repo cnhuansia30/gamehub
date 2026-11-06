@@ -144,5 +144,18 @@
     "sortOrder": 9,
     "hasLeaderboard": false,
     "isActive": true
+  },
+  {
+    "id": "fishguide",
+    "bannerUrl": "https://raw.githubusercontent.com/cnhuansia30/gamehub/main/data/images/tasks/1793962807300_1790230385501_fgbnr.jpg",
+    "title": "友魚小學堂",
+    "description": "食魚樂園",
+    "colorTheme": "mint",
+    "link": "https://game.hs30.org.tw/fishguide/fishguide.html",
+    "entryCost": 0,
+    "unlockConditions": [],
+    "sortOrder": 0,
+    "hasLeaderboard": false,
+    "isActive": true
   }
 ]
